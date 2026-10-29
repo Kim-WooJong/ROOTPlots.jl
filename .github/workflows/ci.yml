@@ -1,0 +1,66 @@
+name: tests
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  numerical:
+    name: Julia ${{ matrix.julia }} (no ROOT)
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        julia: ['1.11', '1']
+    env:
+      ROOTPLOTS_TEST_ROOT: 'off'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: julia-actions/setup-julia@v2
+        with:
+          version: ${{ matrix.julia }}
+      - name: Instantiate core only
+        run: julia --project=. -e 'using Pkg; Pkg.instantiate()'
+      - name: Check standalone dependencies
+        run: julia --project=. test/dependency_smoke.jl
+      - name: Run numerical and table-adapter tests
+        run: julia --threads=4 --project=. -e 'using Pkg; Pkg.test()'
+
+  native:
+    name: Native ROOT integration (Linux)
+    runs-on: ubuntu-latest
+    env:
+      ROOTPLOTS_TEST_ROOT: required
+    defaults:
+      run:
+        shell: bash -el {0}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: julia-actions/setup-julia@v2
+        with:
+          version: '1'
+      - uses: mamba-org/setup-micromamba@v2
+        with:
+          environment-name: rootplots
+          create-args: >-
+            root_base>=6.40,<7
+            cxx-compiler
+          init-shell: bash
+      - name: Record toolchain
+        run: |
+          julia --version
+          root-config --version
+          "${CXX:-c++}" --version
+      - name: Instantiate core and check the runtime
+        run: |
+          julia --project=. -e 'using Pkg; Pkg.instantiate()'
+          julia --project=. test/dependency_smoke.jl
+          julia --project=. scripts/doctor.jl
+      - name: Run required native tests
+        run: julia --threads=4 --project=. -e 'using Pkg; Pkg.test()'
+      - name: Verify a clean environment with read-only source
+        run: julia --project=. test/readonly_install.jl

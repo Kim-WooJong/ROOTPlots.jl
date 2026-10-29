@@ -1,0 +1,8 @@
+build/
+Manifest.toml
+examples/output/
+
+# macOS metadata and Julia instrumentation output
+.DS_Store
+*.jl.cov
+*.jl.mem
