@@ -13,6 +13,7 @@ end
 The outer edges must be unchanged: no fractional-bin splitting, cropping, or
 implicit movement of visible content into flow bins is performed. Independent
 per-bin `sumw2` values add in quadrature; signed `sumw` values are allowed.
+Flows, entries, and unbinned moments are kept, as ROOT's `TH1::Rebin` does.
 """
 function rebin(h::Hist1D, new_edges::AbstractVector{<:Real})
     validate_stats_hist(h)
@@ -28,7 +29,8 @@ function rebin(h::Hist1D, new_edges::AbstractVector{<:Real})
               for j in 1:length(edges)-1]
     variances = [sum(@view h.sumw2[positions[j]:positions[j+1]-1])
                  for j in 1:length(edges)-1]
-    return Hist1D(edges, values, variances)
+    return Hist1D(edges, values, variances; underflow=h.underflow, overflow=h.overflow,
+                  entries=h.entries, moments=h.moments)
 end
 
 """Visible-bin sum and propagated error. `width=true` integrates bin contents as densities."""
@@ -165,21 +167,57 @@ function histogram_steps(h::Hist1D; label="Histogram", style=GraphStyle())
     return GraphSeries(x, y; label, style, draw=:line, errors=:none)
 end
 
-"""Render a standalone step histogram with a visible zero baseline on linear y axes."""
+"""
+    render_root(h::Hist1D, spec::GraphSpec, outstem; draw=:steps, label="Histogram",
+                style=GraphStyle(), stats=false, fitstats=false, stats_position=:auto,
+                stats_name=nothing, stats_headroom=false, attached_fit=nothing, fit_label="",
+                format=:png)
+
+Render a standalone histogram. `draw=:steps` (default) is a step line with a
+visible zero baseline on linear y axes; other presets and ROOT option strings
+draw a native TH1D.
+
+Statistics and fit boxes (ROOT `TPaveStats`, values computed by ROOT):
+
+- `stats`: `true` for ROOT's default box (name, Entries, Mean, Std Dev), a
+  tuple of fields such as `(:entries, :mean, :std, :underflow, :overflow)`, a
+  ROOT letter string such as `"nemruo"`, or a ROOT OptStat integer; see
+  [`stats_option`](@ref).
+- `fitstats`: fit lines of `attached_fit` (`true` = χ²/ndf, Prob, and
+  parameters ± errors, ROOT `SetOptFit(1111)`); see [`fit_option`](@ref).
+- `attached_fit`: a valid `FitResult` from `fit_root(h, …)`, drawn as a native
+  TF1 with ROOT parameter names (`Constant/Mean/Sigma` for `:gaus`, `p0, p1, …`
+  otherwise); `fit_label` adds it to the legend.
+- `stats_position`: `:auto` (ROOT's top-right default), `:topright`,
+  `:topleft`, `:bottomright`, `:bottomleft` (inside the frame), or an NDC box
+  `(x1, y1, x2, y2)`. An automatic legend that would overlap the box is moved
+  below it.
+- `stats_name`: box header (default: `label`).
+- `stats_headroom`: `false` (default) keeps ROOT's behaviour: the box is
+  drawn over the frame and may cover data. `true` raises the automatic y
+  maximum until every bin, error bar, and fit value under the box lies below
+  it (the usual `SetMaximum` fix in ROOT macros); the box position is
+  unchanged. Not combinable with `ylimits`.
+
+A box needs a native TH1D, so `:steps` is drawn as ROOT's `HIST` outline when
+a box or attached fit is requested.
+"""
 function render_root(h::Hist1D, spec::GraphSpec, outstem::AbstractString;
                      draw=:steps, label="Histogram", style=GraphStyle(), format=:png,
-                     stats=false, attached_fit=nothing, root_config=nothing)
+                     stats=false, fitstats=false, stats_position=:auto, stats_name=nothing,
+                     stats_headroom=false, attached_fit=nothing, fit_label="", root_config=nothing)
+    box = (; stats, fitstats, stats_position, stats_name, stats_headroom, attached_fit, fit_label)
     if draw isa AbstractString && uppercase(strip(draw)) != "STEPS"
         return render_hist_root(h, spec, outstem;
-                                mode=String(draw), label, style, format, stats,
-                                attached_fit, root_config)
+                                mode=String(draw), label, style, format, box..., root_config)
     end
-    stats && throw(ArgumentError("statistics boxes require native ROOT histogram drawing"))
-    attached_fit === nothing ||
-        throw(ArgumentError("attached_fit requires a raw ROOT draw-option string"))
     mode = hist_draw_mode(draw)
+    # Statistics/fit boxes and bin labels belong to a native TH1D, so :steps then draws HIST.
+    native = attached_fit !== nothing || stats_option(stats) > 0 || fit_option(fitstats) > 0 ||
+             spec.xaxis.bin_labels !== nothing
+    mode == :steps && native && (mode = :hist)
     mode == :steps || return render_hist_root(h, spec, outstem;
-                                            mode, label, style, format, root_config)
+                                            mode, label, style, format, box..., root_config)
     line = histogram_steps(h; label, style)
     ylimits = spec.ylimits
     if ylimits === nothing && !spec.logy
@@ -210,6 +248,26 @@ function fit_pull_points(h::Hist1D, fit::FitResult; label="Pull", style=GraphSty
                        label, style, errors=:none)
 end
 
+"""
+The two-pad fit/pull layout owns its margins, annotations and legend. Axis
+styles, grids, ticks, and the ROOT title box apply: `xaxis` to the x axes of both
+pads (labels are drawn on the pull pad), `yaxis` to the upper pad, `canvas` grids
+and ticks to both pads, and the title box to the upper pad. With a ROOT `style`,
+the pads keep the style's side margins and ticks, and its text sizes are
+rescaled to each pad's height; an experiment label goes to the upper pad.
+"""
+function validate_fit_pull_scene(spec::GraphSpec)
+    isempty(spec.lines) && isempty(spec.texts) && spec.legend_spec === nothing ||
+        throw(ArgumentError("lines, texts and legend_spec are supported on one-pad plots, not the fit/pull layout"))
+    c = spec.canvas
+    all(getfield(c, f) === nothing for f in (:left_margin, :right_margin, :bottom_margin, :top_margin)) ||
+        throw(ArgumentError("the fit/pull layout owns its pad margins"))
+    validate_axis(spec.xaxis; name=:x); validate_axis(spec.yaxis; name=:y); validate_canvas(c)
+    validate_style_and_label(spec)
+    check_spec_bins(spec, "the fit/pull layout")
+    return spec
+end
+
 """Render a χ² histogram fit and its valid-bin pulls in aligned ROOT pads.
 
 The upper pad shows every visible bin, while the curve and pull points use the
@@ -222,7 +280,7 @@ function render_root(h::Hist1D, fit::FitResult, spec::GraphSpec, outstem::Abstra
                      data_style=GraphStyle(), fit_style=GraphStyle(color="#cc3311"),
                      pull_style=GraphStyle(), format=:png, root_config=nothing)
     paths = plot_output_paths(outstem, format)
-    has_scene(spec) && throw(ArgumentError("scene styling is currently supported on one-pad plots, not fit/pull layouts"))
+    validate_fit_pull_scene(spec)
     validate_stats_hist(h)
     all(x -> 0 < x <= 10000, spec.size) ||
         throw(ArgumentError("canvas dimensions must be in 1:10000"))
@@ -232,7 +290,9 @@ function render_root(h::Hist1D, fit::FitResult, spec::GraphSpec, outstem::Abstra
     xlimits = spec.xlimits === nothing ? (first(h.edges), last(h.edges)) : spec.xlimits
     display_spec = GraphSpec(; xlabel=spec.xlabel, ylabel=spec.ylabel, title=spec.title,
                              xlimits, ylimits=spec.ylimits, logx=spec.logx,
-                             logy=spec.logy, legend=spec.legend, size=spec.size)
+                             logy=spec.logy, legend=spec.legend, size=spec.size,
+                             xaxis=spec.xaxis, yaxis=spec.yaxis, canvas=spec.canvas,
+                             style=spec.style, cms_label=spec.cms_label, atlas_label=spec.atlas_label)
     limits = graph_limits([curve, data], display_spec)
     span = max(3.0, 1.2 * maximum(abs, pull.y))
     ylim = pull_limits === nothing ? (-span, span) : Tuple(Float64.(pull_limits))

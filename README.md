@@ -7,12 +7,21 @@ plot specifications are Julia values; a small C++ bridge runs ROOT in isolated
 batch processes and writes PNG/PDF. No Julia plotting package, Python, PyCall, or
 GUI is required. ROOT itself must be installed separately.
 
-**Status:** experimental (0.2.0). Source on GitHub; not registered in the Julia
+**Status:** experimental (0.2.1). Source on GitHub; not registered in the Julia
 General registry. The former package name was `JuliaROOT`. See [migration](docs/migration.md).
 
 ![Synthetic ROOT graphics gallery](docs/images/overview.png)
 
 *Native ROOT output from `scripts/graphics_gallery.jl`; synthetic inputs only.*
+
+## Design
+
+ROOTPlots.jl is a Julia API for using ROOT's own drawing and fitting features,
+not a reimplementation. Every option maps onto a ROOT method/option/style
+setting, named so a ROOT user recognises it (snake_case of the ROOT method;
+docstring cites it). An unset option keeps ROOT's default behaviour. Drawing,
+statistics, fitting and formatting are done by ROOT; Julia only validates input
+and passes data/options. See [design](docs/design.md).
 
 ## Requirements and installation
 
@@ -76,6 +85,33 @@ render_root([fit_curve(fit), observed], GraphSpec(xlabel="x", ylabel="Response")
 `format=:png` is the default. `:pdf` and `:both` are also supported; unselected
 return paths are `nothing`. All example data are **synthetic, not measurements**.
 
+ROOT's own statistics and fit boxes are opt-in keywords:
+
+```julia
+gfit = fit_root(h, :pol0; initial=[2.])
+render_root(h, GraphSpec(), "output/stats"; draw=:e1, stats=true,   # name, Entries, Mean, Std Dev
+            attached_fit=gfit, fitstats=true)                       # χ²/ndf, Prob, p0 ± error
+```
+
+See [statistics and fit boxes](docs/api.md#statistics-and-fit-boxes) for field
+selection (`stats=(:entries, :mean, :underflow, :overflow)` or ROOT's `"nemruo"`),
+placement, 2D/3D histograms, profiles, graphs, and figures.
+
+Experiment styles are one keyword: `style` selects a ROOT `TStyle`
+(`gROOT->SetStyle`), e.g. ROOT's built-in `:ATLAS`, or the package's `:CMS` style,
+which also draws the "CMS Preliminary" label:
+
+```julia
+render_root(h, GraphSpec(xlabel="m [GeV]", ylabel="Events", style=:CMS), "output/cms"; draw=:e1)
+render_root(h, GraphSpec(style=:CMS, cms_label=(extra="Simulation", energy="13 TeV")), "output/sim")
+render_root(h, GraphSpec(style=:ATLAS, atlas_label=(text="Internal", energy="13 TeV",
+                                                   lumi="140 fb^{-1}")), "output/atlas")
+```
+
+The CMS and ATLAS labels are for collaboration use under each collaboration's
+publication rules; the package only provides the styling. See
+[experiment styles](docs/api.md#experiment-styles).
+
 ## Scope
 
 | Task | Main API |
@@ -86,9 +122,12 @@ return paths are `nothing`. All example data are **synthetic, not measurements**
 | Heatmaps, contours, surfaces, XYZ/error graphs | `Grid2D/3D`, `Graph3D`, `Graph3DErrors` |
 | Stacks, profiles, (non-convex) polygon bins | `HistStack`, `Profile1D/2D/3D`, `PolygonHist2D` |
 | ROOT fits, covariance and residual diagnostics | `fit_root`, `FitResult`, `chi2_pvalue` |
+| ROOT statistics and fit boxes (Entries, Mean, χ²/ndf, parameters) | `stats`, `fitstats`, `attached_fit` keywords |
 | Native TF1, spline, QQ, polar, efficiency, pie | `ModelCurve`, `SplineCurve`, `QQGraph`, etc. |
 | Native TF2/TF3 from predefined formulas; sampled Julia grids | `ModelSurface`, `ModelVolume`, `function_grid` |
 | Mixed and nested panels, annotations, polygons, axes, legends | `PlotFigure`, `PlotPanel`, `PlotPolygon`, `AxisStyle`, `PlotText` |
+| ROOT axis formats (log, no exponent, more log labels, bin/time labels, `ChangeLabel`), grids, ROOT title box | `AxisStyle`, `LabelChange`, `CanvasStyle` |
+| ROOT styles (`gROOT->SetStyle`: ATLAS, Plain, ...; CMS publication style) and CMS/ATLAS labels | `style`, `cms_label`, `atlas_label`, `root_styles` |
 | Data/model comparisons with ratio panels | `comparison`, `Component`, `PanelSpec` |
 | Bounded parallel independent ROOT jobs | `rootmap` |
 
@@ -121,6 +160,9 @@ julia --threads=4 --project=. scripts/graphics_gallery.jl
 julia --project=. scripts/special_graph_demo.jl
 julia --project=. scripts/graph_extension_demo.jl
 julia --project=. scripts/edge_profile_demo.jl
+julia --project=. scripts/stats_box_demo.jl
+julia --project=. scripts/axis_format_demo.jl
+julia --project=. scripts/experiment_style_demo.jl
 ```
 
 Outputs go to `examples/output/`. CSV/DataFrames analysis examples use the same

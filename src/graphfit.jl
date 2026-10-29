@@ -127,7 +127,33 @@ function validate_graph(s::GraphSeries)
     return s
 end
 
-"""Single ROOT graph canvas with physical-coordinate axis limits."""
+"""
+    GraphSpec(; xlabel="x", ylabel="y", title="", xlimits=nothing, ylimits=nothing,
+              logx=false, logy=false, legend=:topright, size=(800, 600),
+              xaxis=AxisStyle(), yaxis=AxisStyle(), canvas=CanvasStyle(),
+              lines=PlotLine[], texts=PlotText[], legend_spec=nothing,
+              style=nothing, cms_label=nothing, atlas_label=nothing)
+
+Single-pad ROOT canvas for graphs, 1-D histograms, stacks, profiles, functions,
+and special graphs.
+
+- `xlabel`, `ylabel`: axis titles (`TAxis::SetTitle`); `title`: plot title (the
+  package's TLatex heading, or ROOT's title box with `CanvasStyle(opt_title=true)`).
+- `xlimits`, `ylimits`: physical-coordinate frame limits (never logarithms);
+  `nothing` derives them from the data.
+- `logx`, `logy`: `TPad::SetLogx/SetLogy`; non-positive drawn values are rejected.
+- `legend`: automatic legend corner (`:topright`, `:topleft`, `:bottomright`,
+  `:bottomleft`, `:none`); `legend_spec` replaces it with an explicit [`LegendSpec`](@ref).
+- `size`: canvas size in pixels.
+- `xaxis`, `yaxis`: [`AxisStyle`](@ref) (ROOT TAxis attributes); `canvas`: [`CanvasStyle`](@ref).
+- `lines`, `texts`: [`PlotLine`](@ref) and [`PlotText`](@ref) annotations.
+- `style`: ROOT `TStyle` selected with `gROOT->SetStyle` before any object is
+  created (e.g. `:CMS`, `:ATLAS`, `:Plain`, `:Modern`; see [`root_styles`](@ref));
+  `nothing` keeps ROOT's default style. Explicit axis/canvas options still win.
+- `cms_label`, `atlas_label`: experiment label drawn with ROOT TLatex
+  (see "Experiment styles" in the API documentation). `style=:CMS` draws the CMS
+  label by default; `cms_label=false` switches it off.
+"""
 Base.@kwdef struct GraphSpec
     xlabel::String = "x"
     ylabel::String = "y"
@@ -144,6 +170,9 @@ Base.@kwdef struct GraphSpec
     lines::Vector{PlotLine} = PlotLine[]
     texts::Vector{PlotText} = PlotText[]
     legend_spec::Union{Nothing,LegendSpec} = nothing
+    style::Union{Nothing,Symbol} = nothing
+    cms_label::Union{Nothing,Bool,NamedTuple} = nothing
+    atlas_label::Union{Nothing,Bool,NamedTuple} = nothing
 end
 
 GraphSpec(xlabel,ylabel,title,xlimits,ylimits,logx,logy,legend,size) =
@@ -274,8 +303,8 @@ function graphfit_executable(config::AbstractString; force::Bool=false)
     source = normpath(joinpath(@__DIR__, "..", "backend", "root", "graphfit.cpp"))
     return compile_root_backend(config, source, "rootplots-graphfit", "-std=c++20";
                                 force, dependencies=[joinpath(dirname(source), header) for header in
-                                    ("advanced_histograms.hpp", "analytic.hpp", "errorgraphs.hpp", "layouts.hpp",
-                                     "polygons.hpp", "primitives.hpp", "specialgraphs.hpp")])
+                                    ("advanced_histograms.hpp", "analytic.hpp", "axisstyle.hpp", "errorgraphs.hpp", "experiment.hpp", "layouts.hpp",
+                                     "polygons.hpp", "primitives.hpp", "specialgraphs.hpp", "statsbox.hpp")])
 end
 
 function write_graph_series(io, series)
@@ -296,11 +325,17 @@ function write_graph_series(io, series)
     println(io,"END\t",length(series))
 end
 
-function write_graph_spec(path, series, spec, limits)
+function write_graph_spec(path, series, spec, limits; request=nothing, attached_fit=nothing,
+                          attached_to=1, fit_label="")
     open(path, "w") do io
         println(io, "ROOTPlotsGraph\t1")
         println(io, join(("DRAW",spec.size[1],spec.size[2],Int(spec.logx),Int(spec.logy),
                           limits[1]...,limits[2]...,String(spec.legend)), '\t'))
+        request === nothing || write_stats_row(io, request)
+        if attached_fit !== nothing
+            println(io, join(("FITTARGET", attached_to, clean_field(root_latex(String(fit_label)))), '\t'))
+            write_attached_fit(io, attached_fit)
+        end
         println(io, join(("LABELS",clean_field(root_latex(spec.title)),
                           clean_field(root_latex(spec.xlabel)),clean_field(root_latex(spec.ylabel))), '\t'))
         write_scene(io,spec)
@@ -316,22 +351,45 @@ function write_fit_plot_spec(path, series, spec, limits, pull_limits)
                           limits[1]...,limits[2]...,pull_limits...,String(spec.legend)), '\t'))
         println(io, join(("LABELS",clean_field(root_latex(spec.title)),
                           clean_field(root_latex(spec.xlabel)),clean_field(root_latex(spec.ylabel))), '\t'))
+        write_scene(io,spec)
         write_graph_series(io,series)
     end
 end
 
-"""Render one-pad ROOT TGraph/TGraphErrors/TGraphAsymmErrors series in the selected format."""
+"""
+    render_root(series::AbstractVector{GraphSeries}, spec, outstem; format=:png,
+                attached_fit=nothing, attached_to=1, fitstats=false,
+                stats_position=:auto, fit_label="", stats_headroom=false)
+
+Render one-pad ROOT TGraph/TGraphErrors/TGraphAsymmErrors series in the selected format.
+
+`attached_fit` (a valid `FitResult`, normally from `fit_root(series[attached_to], …)`)
+is attached as a native TF1 to graph `attached_to` and drawn by ROOT over the
+fit range. `fitstats` then shows ROOT's fit box (graphs have no histogram
+statistics, as in ROOT): `true` = χ²/ndf, Prob, and parameters ± errors; see
+[`fit_option`](@ref). `stats_position` places it as for histograms, and
+`fit_label` adds the TF1 to the legend (after all series). `stats_headroom=true`
+raises the automatic y maximum so the points stay below the fit box.
+"""
 function render_root(series::AbstractVector{GraphSeries}, spec::GraphSpec,
-                     outstem::AbstractString; format=:png, root_config=nothing)
+                     outstem::AbstractString; format=:png, attached_fit=nothing,
+                     attached_to::Integer=1, fitstats=false, stats_position=:auto,
+                     fit_label="", stats_headroom=false, root_config=nothing)
     paths = plot_output_paths(outstem, format)
     limits = graph_limits(series, spec) # validation before build or output creation
+    check_spec_bins(spec, "a graph")
+    attached_fit === nothing || validate_attached_fit(attached_fit)
+    1 <= attached_to <= length(series) || throw(ArgumentError("attached_to must index a graph series"))
+    request = stats_request(; fitstats, stats_position, fit=attached_fit, name="Graph",
+                            allow_stats=false, what="graphs", stats_headroom, ylimits=spec.ylimits)
+    clean_field(String(fit_label))
     config = find_root_config(root_config)
     config === nothing && throw(ArgumentError("local native ROOT not found"))
     exe = graphfit_executable(config)
     mkpath(dirname(outstem))
     mktempdir() do dir
         input = joinpath(dir,"graph.tsv")
-        write_graph_spec(input,series,spec,limits)
+        write_graph_spec(input,series,spec,limits; request,attached_fit,attached_to,fit_label)
         stem = joinpath(dir,"rendered")
         run(Cmd([exe,input,stem]))
         move_plot_outputs(stem, paths)

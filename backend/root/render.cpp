@@ -1,8 +1,17 @@
+#include <TAxis.h>
+#include <TAxisModLab.h>
 #include <TCanvas.h>
 #include <TBox.h>
+#include <TF1.h>
+#include <TGaxis.h>
+#include <TGraph2D.h>
+#include <THashList.h>
+#include <TPaveText.h>
+#include <TText.h>
 #include <TColor.h>
 #include <TGraphAsymmErrors.h>
 #include <TH1D.h>
+#include <TH2D.h>
 #include <THStack.h>
 #include <TLegend.h>
 #include <TLine.h>
@@ -17,6 +26,7 @@
 #include <cmath>
 #include <cstdlib>
 #include <fstream>
+#include <iomanip>
 #include <iostream>
 #include <memory>
 #include <sstream>
@@ -28,51 +38,16 @@
 // Objects stay alive in Drawn until SaveAs finishes; canvases/pads are destroyed
 // before Drawn. Histograms are detached from TDirectory. No .root file is written.
 namespace {
-struct Bin {
-  int index;
-  double left, right, data, data_lo, data_hi, pred, pred_lo, pred_hi;
-  double ratio, ratio_lo, ratio_hi, band_lo, band_hi;
-  bool valid;
-};
-struct Component {
-  std::string label, color;
-  std::vector<double> values;
-};
-struct Panel {
-  int id, nbins;
-  std::string xlabel, ylabel, annotation, lumi, uncertainty_label;
-  std::vector<Bin> bins;
-  std::vector<Component> components;
-  bool logx = false, logy = false, ratio_logy = false, axis_seen = false;
-  double ymin = 0, ymax = 0, ratio_min = 0.5, ratio_max = 1.5;
-};
-struct Figure {
-  double ratio_min = 0.5, ratio_max = 1.5;
-  std::string marker_color = "#000000", band_color = "#000000";
-  int marker_style = 20, line_width = 1, stack_fill_style = 1001;
-  int band_fill_style = 3345, legend_columns = 2;
-  double marker_size = 0.8;
-  int version = 1;
-  bool settings_seen = false, style_seen = false;
-  std::vector<Panel> panels;
-};
-struct Drawn {
-  std::vector<std::unique_ptr<TH1D>> hists;
-  std::unique_ptr<THStack> stack;
-  std::unique_ptr<TGraphAsymmErrors> data, top_band, ratio_data, ratio_band;
-  std::unique_ptr<TH1D> ratio_axis;
-  std::unique_ptr<TLegend> legend;
-  std::unique_ptr<TLine> unity;
-  std::vector<std::unique_ptr<TLine>> clipped_errors;
-  std::vector<std::unique_ptr<TBox>> clipped_bands;
-  std::vector<std::unique_ptr<TBox>> clipped_ratio_bands;
-};
-
+// Tab-separated fields; empty fields (including a trailing one) are kept.
 std::vector<std::string> fields(const std::string &line) {
   std::vector<std::string> out;
-  std::stringstream in(line);
-  std::string field;
-  while (std::getline(in, field, '\t')) out.push_back(field);
+  size_t start = 0;
+  while (true) {
+    const auto pos = line.find('\t', start);
+    out.push_back(line.substr(start, pos == std::string::npos ? pos : pos - start));
+    if (pos == std::string::npos) break;
+    start = pos + 1;
+  }
   return out;
 }
 void check(bool condition, const std::string &message) {
@@ -100,6 +75,61 @@ bool hexcolor(const std::string &text) {
   return std::all_of(text.begin() + 1, text.end(),
                      [](unsigned char c) { return std::isxdigit(c) != 0; });
 }
+// Helper names used by the shared axis header.
+double real(const std::string &text) { return number(text); }
+bool bit(const std::string &text) { return boolean(text); }
+void color(const std::string &text) { check(hexcolor(text), "invalid color: " + text); }
+#include "axisstyle.hpp"
+#include "experiment.hpp"
+struct Bin {
+  int index;
+  double left, right, data, data_lo, data_hi, pred, pred_lo, pred_hi;
+  double ratio, ratio_lo, ratio_hi, band_lo, band_hi;
+  bool valid;
+};
+struct Component {
+  std::string label, color;
+  std::vector<double> values;
+};
+struct Panel {
+  int id, nbins;
+  std::string xlabel, ylabel, annotation, lumi, uncertainty_label;
+  std::vector<Bin> bins;
+  std::vector<Component> components;
+  bool logx = false, logy = false, ratio_logy = false, axis_seen = false;
+  double ymin = 0, ymax = 0, ratio_min = 0.5, ratio_max = 1.5;
+  // Optional PanelSpec axis styles (PCANVAS/PAXIS rows): shared x, upper y, ratio y.
+  std::vector<std::string> canvas = std::vector<std::string>(CV_FIELDS, "-");
+  AxisSpec xaxis, yaxis, ratio_axis;
+  AxisSpec *current_axis = nullptr;
+  std::string current_axis_name;
+  // Optional CMS/ATLAS label of the upper pad (EXPLABEL row).
+  ExperimentLabelSpec label;
+};
+struct Figure {
+  double ratio_min = 0.5, ratio_max = 1.5;
+  std::string marker_color = "#000000", band_color = "#000000";
+  int marker_style = 20, line_width = 1, stack_fill_style = 1001;
+  int band_fill_style = 3345, legend_columns = 2;
+  double marker_size = 0.8;
+  int version = 1;
+  bool settings_seen = false, style_seen = false;
+  std::string root_style; // ROOTSTYLE row: gROOT->SetStyle before the canvas exists
+  std::vector<Panel> panels;
+};
+struct Drawn {
+  std::vector<std::unique_ptr<TH1D>> hists;
+  std::unique_ptr<THStack> stack;
+  std::unique_ptr<TGraphAsymmErrors> data, top_band, ratio_data, ratio_band;
+  std::unique_ptr<TH1D> ratio_axis;
+  std::unique_ptr<TLegend> legend;
+  std::unique_ptr<TLine> unity;
+  std::vector<std::unique_ptr<TLine>> clipped_errors;
+  std::vector<std::unique_ptr<TBox>> clipped_bands;
+  std::vector<std::unique_ptr<TBox>> clipped_ratio_bands;
+};
+
+
 Figure parse(const std::string &path) {
   std::ifstream input(path);
   check(bool(input), "cannot open plot specification: " + path);
@@ -134,6 +164,15 @@ Figure parse(const std::string &path) {
              figure.stack_fill_style == 3345) &&
             (figure.band_fill_style == 0 || figure.band_fill_style == 1001 ||
              figure.band_fill_style == 3345), "unsupported fill style");
+    } else if (f[0] == "ROOTSTYLE") {
+      check(figure.version == 2 && f.size() == 2 && figure.root_style.empty() && figure.panels.empty(),
+            "malformed or duplicate ROOTSTYLE row");
+      figure.root_style = f[1];
+    } else if (f[0] == "EXPLABEL") {
+      check(!figure.panels.empty(), "EXPLABEL before PANEL");
+      auto &p = figure.panels.back();
+      check(!p.label.active && p.bins.empty(), "invalid or duplicate EXPLABEL row");
+      p.label = read_experiment_label(f);
     } else if (f[0] == "PANEL") {
       check(f.size() == 8, "malformed PANEL row");
       Panel p{integer(f[1]), integer(f[7]), f[2], f[3], f[4], f[5], f[6], {}, {}};
@@ -154,6 +193,28 @@ Figure parse(const std::string &path) {
       check(p.ymin < p.ymax && p.ratio_min < p.ratio_max &&
             (!p.logy || p.ymin > 0) && (!p.ratio_logy || p.ratio_min > 0),
             "invalid axis limits");
+    } else if (f[0] == "PCANVAS") {
+      check(f.size() == 2 + CV_FIELDS && !figure.panels.empty(), "malformed PCANVAS row");
+      auto &p = figure.panels.back();
+      check(integer(f[1]) == p.id && p.bins.empty(), "invalid PCANVAS row");
+      p.canvas.assign(f.begin() + 2, f.end());
+      canvas_title_fields(p.canvas);
+      for (int i = 0; i < CV_FIELDS; ++i)
+        check(p.canvas[i] == "-" || i == CV_TICKX || i == CV_TICKY || i == CV_GRIDX || i == CV_GRIDY,
+              "comparison panels support grids and ticks only");
+      for (int i : {CV_TICKX, CV_TICKY}) if (p.canvas[i] != "-") boolean(p.canvas[i]);
+    } else if (f[0] == "PAXIS") {
+      check(f.size() >= 3 && !figure.panels.empty(), "malformed PAXIS row");
+      auto &p = figure.panels.back();
+      check(integer(f[1]) == p.id && p.bins.empty(), "invalid PAXIS row");
+      p.current_axis = f[2] == "x" ? &p.xaxis : f[2] == "y" ? &p.yaxis : f[2] == "ratio" ? &p.ratio_axis : nullptr;
+      check(p.current_axis != nullptr, "invalid PAXIS axis");
+      p.current_axis_name = f[2];
+      axis_scalars(*p.current_axis, f, 3);
+    } else if (f[0] == "AXTIME" || f[0] == "AXBIN" || f[0] == "AXCHANGE") {
+      check(!figure.panels.empty() && figure.panels.back().current_axis, "axis detail row before PAXIS");
+      auto &p = figure.panels.back();
+      check(axis_extra(*p.current_axis, f, p.current_axis_name), "axis detail row for another axis");
     } else if (f[0] == "BIN") {
       check(f.size() == 17 && !figure.panels.empty(), "malformed BIN row");
       auto &p = figure.panels.back();
@@ -199,16 +260,36 @@ void draw_panel(const Panel &p, int col, int count, const Figure &figure,
                 TCanvas &canvas, Drawn &d) {
   canvas.cd();
   const double x0 = double(col) / count, x1 = double(col + 1) / count;
-  auto *top = new TPad(("top" + std::to_string(col)).c_str(), "", x0, 0.28, x1, 0.98);
-  auto *bottom = new TPad(("bottom" + std::to_string(col)).c_str(), "", x0, 0.05, x1, 0.28);
+  // With a selected ROOT style or an experiment label, the pads span the full
+  // canvas height and take the style's margins, ticks and text sizes rescaled
+  // to each pad's height (style_scaled_axis); the legend moves into the frame.
+  const bool styled = style_selected() || p.label.active;
+  const double split = styled ? 0.30 : 0.28, low = styled ? 0.0 : 0.05, high = styled ? 1.0 : 0.98;
+  const double ft = high - split, fb = split - low;
+  auto *top = new TPad(("top" + std::to_string(col)).c_str(), "", x0, split, x1, high);
+  auto *bottom = new TPad(("bottom" + std::to_string(col)).c_str(), "", x0, low, x1, split);
   canvas.cd(); top->Draw(); bottom->Draw();
-  top->SetTicks(1, 1); bottom->SetTicks(1, 1);
+  if (!styled || !style_selected()) { top->SetTicks(1, 1); bottom->SetTicks(1, 1); }
+  for (auto *pad : {top, bottom}) {
+    if (p.canvas[CV_TICKX] != "-") pad->SetTickx(boolean(p.canvas[CV_TICKX]));
+    if (p.canvas[CV_TICKY] != "-") pad->SetTicky(boolean(p.canvas[CV_TICKY]));
+    apply_pad_grid(*pad, p.canvas);
+  }
   top->SetLogx(p.logx); bottom->SetLogx(p.logx);
   top->SetLogy(p.logy); bottom->SetLogy(p.ratio_logy);
-  top->SetLeftMargin(0.18); top->SetRightMargin(0.04);
-  top->SetBottomMargin(0.012); top->SetTopMargin(0.20);
-  bottom->SetLeftMargin(0.18); bottom->SetRightMargin(0.04);
-  bottom->SetTopMargin(0.02); bottom->SetBottomMargin(0.35);
+  if (styled) {
+    if (!style_selected()) for (auto *pad : {top, bottom}) { pad->SetLeftMargin(0.18); pad->SetRightMargin(0.04); }
+    top->SetTopMargin(gStyle->GetPadTopMargin() / ft); top->SetBottomMargin(0.02);
+    bottom->SetTopMargin(0.03); bottom->SetBottomMargin(gStyle->GetPadBottomMargin() / fb);
+  } else {
+    top->SetLeftMargin(0.18); top->SetRightMargin(0.04);
+    top->SetBottomMargin(0.012); top->SetTopMargin(0.20);
+    bottom->SetLeftMargin(0.18); bottom->SetRightMargin(0.04);
+    bottom->SetTopMargin(0.02); bottom->SetBottomMargin(0.35);
+  }
+  // The label (drawn last) may grow the top margin; register it before the
+  // frame and legend are laid out from that margin.
+  if (p.label.active) { mark_two_pad(top); register_label(top, p.label, p.id); }
 
   std::vector<double> edges;
   edges.reserve(p.nbins + 1);
@@ -306,27 +387,74 @@ void draw_panel(const Panel &p, int col, int count, const Figure &figure,
   d.stack->GetXaxis()->SetLabelSize(0);
   d.stack->GetXaxis()->SetTitleSize(0);
   d.stack->GetYaxis()->SetTitle(p.ylabel.c_str());
-  d.stack->GetYaxis()->SetTitleOffset(1.55);
-  d.stack->GetYaxis()->SetLabelSize(0.038);
+  if (styled) {
+    style_scaled_axis(d.stack->GetXaxis(), "X", top, true);
+    style_scaled_axis(d.stack->GetYaxis(), "Y", top, false);
+    // Event counts reach thousands; on the narrow comparison pad four-digit
+    // labels would run into the y title, so ROOT shows an x10^n exponent instead
+    // (yaxis=AxisStyle(max_digits=...) overrides).
+    d.stack->GetYaxis()->SetMaxDigits(3);
+  } else {
+    d.stack->GetYaxis()->SetTitleOffset(1.55);
+    d.stack->GetYaxis()->SetLabelSize(0.038);
+  }
+  // The shared x style also applies to the upper pad, whose labels stay hidden.
+  apply_axis_spec(d.stack->GetXaxis(), p.xaxis, "x");
+  d.stack->GetXaxis()->SetLabelSize(0); d.stack->GetXaxis()->SetTitleSize(0);
+  apply_axis_spec(d.stack->GetYaxis(), p.yaxis, "y");
   d.top_band->Draw("2 SAME");
   for (auto &box : d.clipped_bands) box->Draw("SAME");
   d.data->Draw("P E1 SAME");
   for (auto &line : d.clipped_errors) line->Draw("SAME");
-  d.legend = std::make_unique<TLegend>(0.47, 0.80, 0.96, 0.94);
-  d.legend->SetNColumns(figure.legend_columns); d.legend->SetBorderSize(0); d.legend->SetFillStyle(0);
-  d.legend->SetTextSize(0.027);
+  int legend_columns = figure.legend_columns;
+  if (styled) {
+    // Inside the frame, top right, sized from the labels measured by ROOT; it
+    // keeps clear of a label at the top left (fewer columns, then smaller text).
+    const double l = top->GetLeftMargin(), r = top->GetRightMargin(), t = top->GetTopMargin();
+    const double right = 1 - r - 0.03;
+    const double left = p.label.active && p.label.position == "inside_left" ? l + 0.42 * (1 - l - r) : l + 0.03;
+    double size = 0.032 * two_pad_text(top).k, widest = 0;
+    std::vector<std::string> labels;
+    for (const auto &c : p.components) labels.push_back(c.label);
+    labels.push_back(p.uncertainty_label); labels.push_back("Data");
+    for (const auto &label : labels) widest = std::max(widest, text_width_ndc(top, label, 42, size));
+    const double column = (widest + 0.02) / 0.75; // TLegend symbol margin 0.25
+    while (legend_columns > 1 && legend_columns * column > right - left) --legend_columns;
+    const double width = std::min(legend_columns * column, right - left);
+    if (legend_columns * column > width) size *= width / (legend_columns * column);
+    const int rows = (int(labels.size()) + legend_columns - 1) / legend_columns;
+    const double y2 = 1 - t - 0.03, y1 = y2 - rows * 1.35 * size;
+    d.legend = std::make_unique<TLegend>(right - width, y1, right, y2);
+    d.legend->SetTextSize(size); d.legend->SetTextFont(42); d.legend->SetMargin(0.25);
+  } else {
+    d.legend = std::make_unique<TLegend>(0.47, 0.80, 0.96, 0.94);
+    d.legend->SetTextSize(0.027);
+  }
+  d.legend->SetNColumns(legend_columns); d.legend->SetBorderSize(0); d.legend->SetFillStyle(0);
   for (size_t j = 0; j < p.components.size(); ++j)
     d.legend->AddEntry(d.hists[j].get(), p.components[j].label.c_str(), "f");
   d.legend->AddEntry(d.top_band.get(), p.uncertainty_label.c_str(), "f");
   d.legend->AddEntry(d.data.get(), "Data", "pe");
   d.legend->Draw();
   TLatex text; text.SetNDC();
-  // Caller-supplied free text only; no experiment label is added.
-  text.SetTextFont(42); text.SetTextSize(0.034);
-  if (!p.annotation.empty()) text.DrawLatex(0.18, 0.958, p.annotation.c_str());
-  if (!p.lumi.empty()) {
-    text.SetTextAlign(31); text.SetTextSize(0.029);
-    text.DrawLatex(0.96, 0.966, p.lumi.c_str());
+  if (p.label.active) {
+    // The label (registered above) carries the annotation and the luminosity text.
+  } else if (styled) {
+    // Caller-supplied free text above the frame: annotation left, luminosity right.
+    const double l = top->GetLeftMargin(), r = top->GetRightMargin(), t = top->GetTopMargin();
+    const PadText g = two_pad_text(top);
+    const double tm = std::min(t * g.hr, 0.1), y = 1 - t + 0.2 * tm / g.hr;
+    text.SetTextFont(42); text.SetTextSize(0.6 * tm * g.k);
+    if (!p.annotation.empty()) { text.SetTextAlign(11); text.DrawLatex(l, y, p.annotation.c_str()); }
+    if (!p.lumi.empty()) { text.SetTextAlign(31); text.DrawLatex(1 - r, y, p.lumi.c_str()); }
+  } else {
+    // Caller-supplied free text only; no experiment label is added.
+    text.SetTextFont(42); text.SetTextSize(0.034);
+    if (!p.annotation.empty()) text.DrawLatex(0.18, 0.958, p.annotation.c_str());
+    if (!p.lumi.empty()) {
+      text.SetTextAlign(31); text.SetTextSize(0.029);
+      text.DrawLatex(0.96, 0.966, p.lumi.c_str());
+    }
   }
 
   bottom->cd();
@@ -336,14 +464,23 @@ void draw_panel(const Panel &p, int col, int count, const Figure &figure,
   d.ratio_axis->SetMinimum(p.ratio_min);
   d.ratio_axis->SetMaximum(p.ratio_max);
   d.ratio_axis->GetYaxis()->SetTitle("Data / pred.");
-  d.ratio_axis->GetYaxis()->SetTitleSize(0.10);
-  d.ratio_axis->GetYaxis()->SetTitleOffset(0.63);
-  d.ratio_axis->GetYaxis()->SetLabelSize(0.09);
-  d.ratio_axis->GetYaxis()->SetNdivisions(503);
   d.ratio_axis->GetXaxis()->SetTitle(p.xlabel.c_str());
-  d.ratio_axis->GetXaxis()->SetTitleSize(0.12);
-  d.ratio_axis->GetXaxis()->SetLabelSize(0.10);
-  d.ratio_axis->GetXaxis()->SetTitleOffset(1.05);
+  if (styled) {
+    style_scaled_axis(d.ratio_axis->GetXaxis(), "X", bottom, true);
+    style_scaled_axis(d.ratio_axis->GetYaxis(), "Y", bottom, false);
+    // The short ratio pad holds the long title at 80% of the style's size.
+    d.ratio_axis->GetYaxis()->SetTitleSize(0.8 * d.ratio_axis->GetYaxis()->GetTitleSize());
+  } else {
+    d.ratio_axis->GetYaxis()->SetTitleSize(0.10);
+    d.ratio_axis->GetYaxis()->SetTitleOffset(0.63);
+    d.ratio_axis->GetYaxis()->SetLabelSize(0.09);
+    d.ratio_axis->GetXaxis()->SetTitleSize(0.12);
+    d.ratio_axis->GetXaxis()->SetLabelSize(0.10);
+    d.ratio_axis->GetXaxis()->SetTitleOffset(1.05);
+  }
+  d.ratio_axis->GetYaxis()->SetNdivisions(503);
+  apply_axis_spec(d.ratio_axis->GetXaxis(), p.xaxis, "x");
+  apply_axis_spec(d.ratio_axis->GetYaxis(), p.ratio_axis, "y");
   d.ratio_axis->Draw("AXIS");
   d.unity = std::make_unique<TLine>(edges.front(), 1, edges.back(), 1);
   d.unity->SetLineWidth(figure.line_width); d.unity->Draw("SAME");
@@ -375,8 +512,10 @@ int main(int argc, char **argv) {
     gROOT->SetBatch(kTRUE);
     quiet_root();
     gStyle->SetOptStat(0); gStyle->SetOptTitle(0);
-    gStyle->SetEndErrorSize(4); gStyle->SetErrorX(0);
     auto figure = parse(argv[1]);
+    // A selected style keeps its own error-bar settings.
+    if (!figure.root_style.empty()) select_root_style(figure.root_style);
+    else { gStyle->SetEndErrorSize(4); gStyle->SetErrorX(0); }
     // Declare drawings before canvas, so canvas/pads release references first.
     std::vector<std::unique_ptr<Drawn>> drawings;
     TCanvas canvas("rootplots", "ROOTPlots control distributions",
@@ -387,6 +526,7 @@ int main(int argc, char **argv) {
       drawings.push_back(std::move(drawing));
     }
     canvas.cd(); canvas.Modified(); canvas.Update();
+    finish_canvas(canvas);
     canvas.SaveAs((std::string(argv[2]) + ".png").c_str());
     canvas.SaveAs((std::string(argv[2]) + ".pdf").c_str());
     return 0;

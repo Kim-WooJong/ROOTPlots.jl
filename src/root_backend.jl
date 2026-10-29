@@ -27,6 +27,14 @@ end
 """Translate the Greek characters used in panel labels into ROOT's TLatex spelling."""
 root_latex(value::AbstractString) = replace(String(value), "μ" => "#mu", "ℓ" => "#ell")
 
+"""The one ROOT style named by the comparison panels (all must agree), or nothing."""
+function comparison_style(specs)
+    styles = [s.style for s in specs if s.style !== nothing]
+    length(unique(lowercase.(String.(styles)))) <= 1 ||
+        throw(ArgumentError("comparison panels request different ROOT styles; gROOT->SetStyle is process-global"))
+    return isempty(styles) ? nothing : first(styles)
+end
+
 """Write versioned, precomputed plot geometry to a private TSV file for the native renderer. Ratio arithmetic remains Julia-owned; no ROOT files are created."""
 function write_root_spec(path::AbstractString, cmps::AbstractVector{Comparison},
                          specs::AbstractVector{PanelSpec}, ratio_limits, style=PlotStyle())
@@ -40,6 +48,8 @@ function write_root_spec(path::AbstractString, cmps::AbstractVector{Comparison},
                           something(style.band_fill_style, 3345),
                           something(style.band_color, "#000000"),
                           something(style.legend_columns, 2)), '\t'))
+        root_style = comparison_style(specs)
+        root_style === nothing || println(io, "ROOTSTYLE\t", String(root_style))
         for (panel_id, (cmp, spec)) in enumerate(zip(cmps, specs))
             n = length(cmp.data.sumw)
             println(io, join(("PANEL", panel_id, clean_field(root_latex(spec.xlabel)),
@@ -49,6 +59,14 @@ function write_root_spec(path::AbstractString, cmps::AbstractVector{Comparison},
             println(io, join(("AXIS", panel_id, Int(spec.logx), Int(spec.logy),
                               Int(spec.ratio_logy), limits.ymin, limits.ymax,
                               limits.ratio_min, limits.ratio_max), '\t'))
+            write_experiment_label(io, experiment_label(spec; lumi=spec.lumi, annotation=spec.annotation))
+            if has_panel_axes(spec)
+                validate_panel_axes(spec, n)
+                println(io, join(("PCANVAS", panel_id, (scene_value(getfield(spec.canvas, f)) for f in fieldnames(CanvasStyle))...), '\t'))
+                for (name, a) in (("x", spec.xaxis), ("y", spec.yaxis), ("ratio", spec.ratio_yaxis))
+                    write_axis(io, "PAXIS\t$panel_id", name, a)
+                end
+            end
             for i in 1:n
                 valid = cmp.valid[i]
                 println(io, join(("BIN", panel_id, i, cmp.data.edges[i], cmp.data.edges[i+1],
@@ -92,6 +110,41 @@ function image_difference(reference::AbstractString, candidate::AbstractString; 
     w, h = parse(Int, fields[2]), parse(Int, fields[3])
     return (; same_size=true, width=w, height=h, max=parse(Float64, fields[4]),
             mean=parse(Float64, fields[5]), changed_fraction=parse(Int, fields[6]) / (w * h))
+end
+
+"""
+    image_colored_fraction(path; root_config=nothing)
+
+Fraction of PNG pixels whose RGB channels differ by more than 32 (internal; used
+by tests to check that black-and-white output contains no coloured pixels).
+"""
+function image_colored_fraction(path::AbstractString; root_config=nothing)
+    config = find_root_config(root_config)
+    config === nothing && throw(ArgumentError("local native ROOT not found"))
+    exe = graphfit_executable(config)
+    fields = split(strip(read(Cmd([exe, "--image-chroma", String(path)]), String)), '\t')
+    first(fields) == "CHROMA" && length(fields) == 4 || error("unexpected image colour output")
+    return parse(Int, fields[4]) / (parse(Int, fields[2]) * parse(Int, fields[3]))
+end
+
+"""
+    image_ink_bounds(path; region=nothing, root_config=nothing)
+
+Bounding box of the dark pixels of a PNG (internal; used by tests to check that
+text stays inside a canvas or pad). `region=(x0, y0, x1, y1)` limits the search
+to an inclusive pixel rectangle (top-left origin). Returns
+`(; width, height, xmin, ymin, xmax, ymax)`, the box fields being `-1` without dark pixels.
+"""
+function image_ink_bounds(path::AbstractString; region=nothing, root_config=nothing)
+    config = find_root_config(root_config)
+    config === nothing && throw(ArgumentError("local native ROOT not found"))
+    exe = graphfit_executable(config)
+    args = region === nothing ? String[] : string.(Int.(collect(region)))
+    length(args) in (0, 4) || throw(ArgumentError("region must be (x0, y0, x1, y1)"))
+    fields = split(strip(read(Cmd([exe, "--image-ink", String(path), args...]), String)), '\t')
+    first(fields) == "INK" && length(fields) == 7 || error("unexpected image ink output")
+    v = parse.(Int, fields[2:7])
+    return (; width=v[1], height=v[2], xmin=v[3], ymin=v[4], xmax=v[5], ymax=v[6])
 end
 
 const ROOT_BUILD_LOCK = ReentrantLock()
@@ -140,7 +193,8 @@ end
 """Compile the local control renderer, reusing a content/configuration-keyed artifact."""
 function build_root_backend(config::AbstractString; force::Bool=false)
     source = normpath(joinpath(@__DIR__, "..", "backend", "root", "render.cpp"))
-    return compile_root_backend(config, source, "rootplots-render", "-std=c++17"; force)
+    return compile_root_backend(config, source, "rootplots-render", "-std=c++17"; force,
+                                dependencies=[joinpath(dirname(source), header) for header in ("axisstyle.hpp", "experiment.hpp")])
 end
 
 """
@@ -177,7 +231,10 @@ function render_root(cmps::AbstractVector{Comparison}, specs::AbstractVector{Pan
     validate_style(style)
     for (cmp, spec) in zip(cmps, specs)
         panel_limits(cmp, spec, ratio_limits)
+        validate_panel_axes(spec, length(cmp.data.sumw))
+        experiment_label(spec; lumi=spec.lumi, annotation=spec.annotation)
     end
+    comparison_style(specs)
     config = find_root_config(root_config)
     config === nothing && throw(ArgumentError("local native ROOT not found; install ROOT or pass root_config to render_root"))
     exe = build_root_backend(config)

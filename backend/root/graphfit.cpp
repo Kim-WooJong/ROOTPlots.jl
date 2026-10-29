@@ -1,5 +1,10 @@
+#include <TAxis.h>
+#include <TAxisModLab.h>
 #include <TCanvas.h>
 #include <TColor.h>
+#include <THashList.h>
+#include <TPaveText.h>
+#include <TText.h>
 #include <TF1.h>
 #include <TFitResult.h>
 #include <TFitResultPtr.h>
@@ -16,12 +21,14 @@
 #include <TH1D.h>
 #include <TH1F.h>
 #include <TH2D.h>
+#include <THLimitsFinder.h>
 #include <TH3D.h>
 #include <TLegend.h>
 #include <TList.h>
 #include <TLatex.h>
 #include <TLine.h>
 #include <TPad.h>
+#include <TPaveStats.h>
 #include <TROOT.h>
 #include <TStyle.h>
 #include <THStack.h>
@@ -45,6 +52,7 @@
 #include <algorithm>
 #include <cctype>
 #include <cmath>
+#include <cstdio>
 #include <cstdlib>
 #include <fstream>
 #include <iomanip>
@@ -93,6 +101,8 @@ void color(const std::string &s) {
   check(s.size()==7 && s[0]=='#',"invalid color");
   for(size_t i=1;i<7;++i) check(std::isxdigit(static_cast<unsigned char>(s[i]))!=0,"invalid color");
 }
+#include "axisstyle.hpp"
+#include "experiment.hpp"
 struct Point { double x,y,exl,exh,eyl,eyh; };
 struct Series {
   std::string kind,draw,errors,label,hex;
@@ -248,14 +258,16 @@ struct TextSpec {
 struct LegendItem { std::string target,label,option; int index; };
 struct Scene {
   bool active=false,legend=false,explicit_entries=false;
-  std::vector<std::string> canvas=std::vector<std::string>(9,"-");
-  std::vector<std::string> axes[2]={std::vector<std::string>(10,"-"),std::vector<std::string>(10,"-")};
+  std::vector<std::string> canvas=std::vector<std::string>(CV_FIELDS,"-");
+  AxisSpec axes[3]; // x, y, and (2-D/3-D views) z
   std::vector<LineSpec> lines;
   std::vector<TextSpec> texts;
   std::vector<LegendItem> entries;
   double x1=0,y1=0,x2=0,y2=0,text_size=0.04;
   int font=42,border=0,columns=1;
   std::string background="-";
+  ExperimentLabelSpec label; // optional CMS/ATLAS label (EXPLABEL row)
+  int owner=0;               // label owner id: one label per scene
 };
 bool font_code(int f) { return f>=10 && f<=159 && f%10<=3; }
 void text_field(const std::string &s) {
@@ -269,7 +281,9 @@ Scene read_scene(const std::vector<std::vector<std::string>> &rows,size_t &at) {
   if(at>=rows.size() || rows[at][0]!="SCENE") return s;
   check(rows[at].size()==2 && rows[at][1]=="1","invalid SCENE version"); ++at;
   s.active=true;
-  check(at<rows.size() && rows[at].size()==10 && rows[at][0]=="CANVAS","invalid CANVAS");
+  // The request's ROOT style was selected in main() before any object existed.
+  if(at<rows.size() && rows[at][0]=="ROOTSTYLE") { check(rows[at].size()==2,"invalid ROOTSTYLE"); ++at; }
+  check(at<rows.size() && rows[at].size()==1+CV_FIELDS && rows[at][0]=="CANVAS","invalid CANVAS");
   s.canvas.assign(rows[at].begin()+1,rows[at].end()); ++at;
   for(int i=0;i<4;++i) if(s.canvas[i]!="-") {
     double v=real(s.canvas[i]); check(v>=0 && v<1,"invalid canvas margin");
@@ -280,17 +294,15 @@ Scene read_scene(const std::vector<std::vector<std::string>> &rows,size_t &at) {
   if(s.canvas[6]!="-") check(integer(s.canvas[6])>=1 && integer(s.canvas[6])<=100,"invalid frame width");
   if(s.canvas[7]!="-") check(real(s.canvas[7])>=0,"invalid error cap size");
   if(s.canvas[8]!="-") check(real(s.canvas[8])>0,"invalid PS line scale");
-  for(int a=0;a<2;++a) {
-    check(at<rows.size() && rows[at].size()==12 && rows[at][0]=="AXIS" &&
-          rows[at][1]==(a==0 ? "x" : "y"),"invalid AXIS");
-    auto &v=s.axes[a]; v.assign(rows[at].begin()+2,rows[at].end()); ++at;
-    for(int i:{0,3}) if(v[i]!="-") check(font_code(integer(v[i])),"invalid axis font");
-    for(int i:{1,2,4}) if(v[i]!="-") check(real(v[i])>0,"invalid axis size/offset");
-    if(v[5]!="-") real(v[5]);
-    if(v[6]!="-") check(real(v[6])>=0 && real(v[6])<=1,"invalid tick length");
-    if(v[7]!="-") check(integer(v[7])>=1 && integer(v[7])<=999999,"invalid divisions");
-    if(v[8]!="-") check(integer(v[8])>=1 && integer(v[8])<=10,"invalid max digits");
-    if(v[9]!="-") bit(v[9]);
+  canvas_title_fields(s.canvas);
+  // x and y axes, then an optional z axis (2-D/3-D views); each followed by its
+  // time-format, bin-label and label-change rows.
+  for(int a=0;a<3;++a) {
+    const std::string name=a==0 ? "x" : a==1 ? "y" : "z";
+    if(a==2 && !(at<rows.size() && rows[at].size()>=2 && rows[at][0]=="AXIS" && rows[at][1]=="z")) break;
+    check(at<rows.size() && rows[at][0]=="AXIS" && rows[at].size()>=2 && rows[at][1]==name,"invalid AXIS");
+    axis_scalars(s.axes[a],rows[at],2); ++at;
+    while(at<rows.size() && axis_extra(s.axes[a],rows[at],name)) ++at;
   }
   while(at<rows.size() && rows[at][0]=="LINE") {
     const auto &v=rows[at++];
@@ -326,6 +338,7 @@ Scene read_scene(const std::vector<std::vector<std::string>> &rows,size_t &at) {
       text_field(e[4]); s.entries.push_back({e[1],e[4],e[3],integer(e[2])});
     }
   }
+  if(at<rows.size() && rows[at][0]=="EXPLABEL") { s.label=read_experiment_label(rows[at++]); s.owner=next_label_owner(); }
   check(at<rows.size() && rows[at].size()==1 && rows[at][0]=="ENDSCENE","missing ENDSCENE"); ++at;
   return s;
 }
@@ -349,21 +362,58 @@ void apply_canvas(TPad &canvas,const Scene &s) {
   if(v[6]!="-") { canvas.SetFrameLineWidth(integer(v[6])); gStyle->SetFrameLineWidth(integer(v[6])); }
   if(v[7]!="-") gStyle->SetEndErrorSize(real(v[7]));
   if(v[8]!="-") gStyle->SetLineScalePS(real(v[8]));
+  apply_pad_grid(canvas,v);
+  // Drawn last, from the pad's final margins; an explicit top margin is never grown for it.
+  register_label(&canvas,s.label,s.owner,v[3]!="-");
 }
-void apply_axis(TAxis *axis,const std::vector<std::string> &v) {
-  if(v[0]!="-") axis->SetTitleFont(integer(v[0]));
-  if(v[1]!="-") axis->SetTitleSize(real(v[1]));
-  if(v[2]!="-") axis->SetTitleOffset(real(v[2]));
-  if(v[3]!="-") axis->SetLabelFont(integer(v[3]));
-  if(v[4]!="-") axis->SetLabelSize(real(v[4]));
-  if(v[5]!="-") axis->SetLabelOffset(real(v[5]));
-  if(v[6]!="-") axis->SetTickLength(real(v[6]));
-  if(v[7]!="-") axis->SetNdivisions(integer(v[7]));
-  if(v[8]!="-") axis->SetMaxDigits(integer(v[8])); // Must follow SetNdivisions.
-  if(v[9]!="-") axis->CenterTitle(bit(v[9]));
+void apply_axis_set(TAxis *x,TAxis *y,TAxis *z,const Scene &s) {
+  apply_axis_spec(x,s.axes[0],"x"); apply_axis_spec(y,s.axes[1],"y"); apply_axis_spec(z,s.axes[2],"z");
 }
 void apply_axes(TH1 *frame,const Scene &s) {
-  apply_axis(frame->GetXaxis(),s.axes[0]); apply_axis(frame->GetYaxis(),s.axes[1]);
+  apply_axis_set(frame->GetXaxis(),frame->GetYaxis(),frame->GetZaxis(),s);
+}
+bool has_bin_labels(const Scene &s,int axis) { return !s.axes[axis].bins.empty(); }
+// NDC rectangle of frozen statistics boxes; automatic legends avoid it.
+struct StatsRect { bool on=false; double x1=0,y1=0,x2=0,y2=0; };
+// Text size of automatic legends: ROOT's default axis label size, relative to
+// the pad like every TAttText size. A TLegend with text size 0 (ROOT's
+// default) instead scales its text to fill the box, so the glyph size would
+// depend on the label lengths and the number of entries.
+constexpr double kLegendTextSize=0.035;
+// Automatic legend in a frame corner of the current pad: fixed text size, box
+// sized from the entries (one row of 1.45 text heights each, text width
+// measured by ROOT). Placed below (top corners) or above (bottom corners) a
+// statistics box it would overlap.
+std::unique_ptr<TLegend> automatic_legend(const std::string &corner,
+                                          const std::vector<std::string> &labels,
+                                          const StatsRect &avoid=StatsRect(),
+                                          double text_size=kLegendTextSize) {
+  TVirtualPad *pad=gPad;
+  check(pad!=nullptr,"missing pad for legend");
+  // Under a selected ROOT style the legend text follows the style's label size.
+  if(style_selected() && text_size==kLegendTextSize) text_size=0.8*gStyle->GetLabelSize("X");
+  const double lm=pad->GetLeftMargin(),rm=pad->GetRightMargin(),bm=pad->GetBottomMargin(),tm=pad->GetTopMargin();
+  const double pixels=pad->GetWw()*pad->GetAbsWNDC();
+  TLatex probe; probe.SetTextFont(42); probe.SetTextSize(text_size);
+  double widest=0;
+  for(const auto &label:labels) {
+    probe.SetTitle(label.c_str());
+    UInt_t w=0,h=0; probe.GetBoundingBox(w,h);
+    widest=std::max(widest,static_cast<double>(w));
+  }
+  const double margin=0.25; // TLegend's default symbol fraction of the width
+  const double text=pixels>0 ? widest/pixels : 0.1;
+  const double width=std::min(std::max(0.18,(text+0.02)/(1-margin)),0.6);
+  const double height=static_cast<double>(std::max<size_t>(labels.size(),1))*1.45*text_size;
+  const bool left=corner.find("left")!=std::string::npos,bottom=corner.find("bottom")!=std::string::npos;
+  double x1=left ? lm+0.03 : 1-rm-0.03-width;
+  double y1=bottom ? bm+0.03 : 1-tm-0.03-height;
+  if(avoid.on && x1<avoid.x2 && x1+width>avoid.x1 && y1<avoid.y2 && y1+height>avoid.y1)
+    y1=bottom ? avoid.y2+0.01 : avoid.y1-0.01-height;
+  auto legend=std::make_unique<TLegend>(x1,y1,x1+width,y1+height);
+  legend->SetBorderSize(0); legend->SetFillStyle(0); legend->SetMargin(margin);
+  legend->SetTextFont(42); legend->SetTextSize(text_size);
+  return legend;
 }
 struct SceneObjects {
   std::vector<std::unique_ptr<TLine>> lines;
@@ -373,7 +423,8 @@ struct SceneObjects {
 SceneObjects draw_scene(const Scene &s,const std::string &corner,
                        const std::vector<TObject*> &objects,
                        const std::vector<std::string> &labels,
-                       const std::vector<std::string> &options) {
+                       const std::vector<std::string> &options,
+                       const StatsRect &avoid=StatsRect()) {
   SceneObjects out;
   for(const auto &l:s.lines) {
     auto line=std::make_unique<TLine>(l.x1,l.y1,l.x2,l.y2);
@@ -388,13 +439,17 @@ SceneObjects draw_scene(const Scene &s,const std::string &corner,
     text->SetTextAlign(t.align); text->SetTextAngle(t.angle); text->Draw();
     out.texts.push_back(std::move(text));
   }
-  if(s.legend || corner!="none") {
-    double x1=corner.find("left")!=std::string::npos ? 0.13 : 0.68;
-    double y1=corner.find("bottom")!=std::string::npos ? 0.16 : 0.73;
+  std::vector<std::string> automatic_labels;
+  if(!s.legend && corner!="none") {
+    for(size_t i=0;i<objects.size();++i) if(!labels[i].empty()) automatic_labels.push_back(labels[i]);
+    for(const auto &l:s.lines) if(!l.label.empty()) automatic_labels.push_back(l.label);
+  }
+  // An automatic legend without labelled entries would be empty; it is not drawn.
+  if(s.legend || !automatic_labels.empty()) {
     out.legend=s.legend ? std::make_unique<TLegend>(s.x1,s.y1,s.x2,s.y2) :
-                         std::make_unique<TLegend>(x1,y1,x1+0.20,y1+0.16);
-    out.legend->SetBorderSize(s.legend ? s.border : 0); out.legend->SetFillStyle(0);
+                         automatic_legend(corner,automatic_labels,avoid);
     if(s.legend) {
+      out.legend->SetBorderSize(s.border); out.legend->SetFillStyle(0);
       out.legend->SetTextFont(s.font); out.legend->SetTextSize(s.text_size);
       out.legend->SetNColumns(s.columns);
       if(s.background!="-") { out.legend->SetFillColor(TColor::GetColor(s.background.c_str())); out.legend->SetFillStyle(1001); }
@@ -414,10 +469,14 @@ SceneObjects draw_scene(const Scene &s,const std::string &corner,
   }
   return out;
 }
+#include "statsbox.hpp"
 void draw(const std::vector<std::vector<std::string>> &rows, const std::string &stem) {
   size_t at=0;
   const auto &f=rows[at++];
   check(f.size()==10 && f[0]=="DRAW","invalid DRAW");
+  auto box=read_stats_box(rows,at);
+  auto fit=read_fit_target(rows,at);
+  check(box.optstat==0 && (box.optfit==0 || fit.function),"graph boxes show fits only");
   int width=integer(f[1]),height=integer(f[2]);
   check(width>0 && height>0 && width<=10000 && height<=10000,"invalid canvas size");
   bool logx=bit(f[3]),logy=bit(f[4]);
@@ -449,17 +508,26 @@ void draw(const std::vector<std::vector<std::string>> &rows, const std::string &
   std::vector<std::unique_ptr<TGraph>> graphs;
   std::vector<TObject*> objects;
   std::vector<std::string> labels,options;
+  check(!fit.function || fit.target<=static_cast<int>(series.size()),"invalid graph fit target");
+  TF1 *fit_function=fit.function.get();
+  if(box.active) stats_begin(box);
   for(const auto &s:series) {
     graphs.push_back(make_graph(s));
+    if(fit.function && static_cast<int>(graphs.size())==fit.target)
+      graphs.back()->GetListOfFunctions()->Add(fit.function.release()); // owned by the graph
     graphs.back()->Draw(draw_option(s).c_str());
     objects.push_back(graphs.back().get()); labels.push_back(s.label);
     options.push_back(legend_option(s));
   }
-  auto decorations=draw_scene(scene,corner,objects,labels,options);
+  auto frozen=freeze_stats(canvas,box,{fit_function ? graphs.at(fit.target-1).get() : nullptr},false);
+  stats_headroom(canvas,box,frozen.rect,frame,objects);
+  if(fit_function && !fit.label.empty()) { objects.push_back(fit_function); labels.push_back(fit.label); options.push_back("l"); }
+  auto decorations=draw_scene(scene,corner,objects,labels,options,frozen.rect);
   TLatex heading;
   heading.SetNDC(); heading.SetTextSize(0.035);
-  if(!title.empty()) heading.DrawLatex(0.13,0.94,title.c_str());
+  if(!root_title(canvas,frame,title,scene.canvas) && !title.empty()) heading.DrawLatex(0.13,0.94,title.c_str());
   canvas.Modified(); canvas.Update();
+  finish_canvas(canvas);
   canvas.SaveAs((stem+".png").c_str());
   canvas.SaveAs((stem+".pdf").c_str());
 }
@@ -525,6 +593,7 @@ void draw_hist(const std::vector<std::vector<std::string>> &rows, const std::str
   bool raw=f[0]=="DRAWHISTRAW";
   check((raw && f.size()==14) || (!raw && f.size()==11 && f[0]=="DRAWHIST"),
         "invalid DRAWHIST");
+  auto box=read_stats_box(rows,at);
   int width=integer(f[1]),height=integer(f[2]);
   check(width>0 && height>0 && width<=10000 && height<=10000,"invalid canvas size");
   bool logx=bit(f[3]),logy=bit(f[4]);
@@ -536,7 +605,8 @@ void draw_hist(const std::vector<std::vector<std::string>> &rows, const std::str
   check(corner=="topright" || corner=="topleft" || corner=="bottomright" ||
         corner=="bottomleft" || corner=="none","invalid legend");
   std::string option=raw ? mode : hist_draw_option(mode);
-  bool stats=raw && bit(f[13]);
+  check(!raw || bit(f[13])==box.active,"inconsistent statistics flag");
+  bool stats=box.active;
   if(raw) check_root_option(option);
   check(at<rows.size() && rows[at].size()==5 && rows[at][0]=="LABELS","invalid LABELS");
   auto title=rows[at][1],xlabel=rows[at][2],ylabel=rows[at][3],label=rows[at][4]; ++at;
@@ -572,24 +642,17 @@ void draw_hist(const std::vector<std::vector<std::string>> &rows, const std::str
     hist.SetBinContent(i,value);
     hist.SetBinError(i,std::sqrt(variance));
   }
+  read_hist_stats(rows,at,hist);
   std::unique_ptr<TF1> attached;
   FunctionDetach detach{hist,attached}; // Also detach during parser/scene exceptions.
-  if(raw && at<rows.size() && rows[at][0]=="FITFUNC") {
-    const auto &function_row=rows[at++];
-    check(function_row.size()>=6,"invalid FITFUNC");
-    std::string model=function_row[1];
-    double fit_min=real(function_row[2]),fit_max=real(function_row[3]);
-    int npar=integer(function_row[4]);
-    check(fit_min<fit_max && npar==nparameters(model) &&
-          function_row.size()==static_cast<size_t>(5+npar),"invalid FITFUNC model/range");
-    attached=std::make_unique<TF1>("rootplots_attached_fit",formula(model).c_str(),
-                                   fit_min,fit_max);
-    check(attached->IsValid() && attached->GetNpar()==npar,"ROOT rejected attached function");
-    for(int i=0;i<npar;++i) attached->SetParameter(i,real(function_row[5+i]));
-    if(model=="erfc_edge") check(attached->GetParameter(3)>0,"edge width must be positive");
-    if(model=="double_erf") check(attached->GetParameter(4)>0 && attached->GetParameter(5)>0,"edge widths must be positive");
+  std::string fit_label;
+  attached=read_fit_function(rows,at);
+  if(attached) {
     hist.GetListOfFunctions()->Add(attached.get());
+    if(at<rows.size() && rows[at].size()==2 && rows[at][0]=="FITLABEL") { text_field(rows[at][1]); fit_label=rows[at++][1]; }
   }
+  check(box.optfit==0 || attached,"fit box needs an attached fit");
+  if(stats) hist.SetName(box.name.c_str());
   if(raw) {
     std::string upper=option;
     std::transform(upper.begin(),upper.end(),upper.begin(),[](unsigned char c){return std::toupper(c);});
@@ -627,9 +690,9 @@ void draw_hist(const std::vector<std::vector<std::string>> &rows, const std::str
 
   TCanvas canvas("rootplots_hist_canvas","",width,height);
   apply_canvas(canvas,scene);
-  // SetBinContent does not preserve the original event count; omit Entries.
-  if(stats) gStyle->SetOptStat(1100);
+  if(stats) stats_begin(box);
   canvas.SetLogx(logx); canvas.SetLogy(logy);
+  TH1 *frame=&hist;
   if(raw) {
     hist.GetXaxis()->SetTitle(xlabel.c_str());
     hist.GetYaxis()->SetTitle(ylabel.c_str());
@@ -654,11 +717,13 @@ void draw_hist(const std::vector<std::vector<std::string>> &rows, const std::str
     apply_axes(&hist,scene);
     hist.Draw(option.c_str());
   } else {
-    auto *frame=canvas.DrawFrame(xmin,ymin,xmax,ymax);
+    frame=canvas.DrawFrame(xmin,ymin,xmax,ymax);
+    if(has_bin_labels(scene,0)) frame_bins(frame,&hist,xmin,xmax);
     frame->GetXaxis()->SetTitle(xlabel.c_str());
     frame->GetYaxis()->SetTitle(ylabel.c_str());
     apply_axes(frame,scene);
-    hist.Draw((option+" SAME").c_str());
+    // SAMES keeps ROOT's statistics box on the owned frame.
+    hist.Draw((option+(stats ? " SAMES" : " SAME")).c_str());
   }
   std::vector<std::unique_ptr<TGraph>> graphs;
   std::vector<TObject*> objects{&hist};
@@ -668,11 +733,15 @@ void draw_hist(const std::vector<std::vector<std::string>> &rows, const std::str
     objects.push_back(graphs.back().get()); labels.push_back(s.label);
     options.push_back(legend_option(s));
   }
-  auto decorations=draw_scene(scene,corner,objects,labels,options);
+  auto frozen=freeze_stats(canvas,box,{&hist},false);
+  stats_headroom(canvas,box,frozen.rect,frame,objects);
+  if(attached && !fit_label.empty()) { objects.push_back(attached.get()); labels.push_back(fit_label); options.push_back("l"); }
+  auto decorations=draw_scene(scene,corner,objects,labels,options,frozen.rect);
   TLatex heading;
   heading.SetNDC(); heading.SetTextSize(0.035);
-  if(!title.empty()) heading.DrawLatex(0.13,0.94,title.c_str());
+  if(!root_title(canvas,frame,title,scene.canvas) && !title.empty()) heading.DrawLatex(0.13,0.94,title.c_str());
   canvas.Modified(); canvas.Update();
+  finish_canvas(canvas);
   canvas.SaveAs((stem+".png").c_str());
   canvas.SaveAs((stem+".pdf").c_str());
 }
@@ -681,6 +750,8 @@ void draw_hist_overlay(const std::vector<std::vector<std::string>> &rows,
   size_t at=0;
   const auto &f=rows[at++];
   check(f.size()==14 && f[0]=="DRAWHISTOVERLAY","invalid DRAWHISTOVERLAY");
+  auto box=read_stats_box(rows,at);
+  check(box.optfit==0,"overlay boxes show histogram statistics only");
   int width=integer(f[1]),height=integer(f[2]);
   check(width>0 && height>0 && width<=10000 && height<=10000,"invalid canvas size");
   bool logx=bit(f[3]),logy=bit(f[4]);
@@ -692,6 +763,7 @@ void draw_hist_overlay(const std::vector<std::vector<std::string>> &rows,
   bool explicit_x=bit(f[10]),explicit_y=bit(f[11]);
   check(!explicit_y || !logy || ymin>0,"invalid log y limit");
   bool stats=bit(f[12]);
+  check(stats==box.active,"inconsistent statistics flag");
   int nlayer=integer(f[13]);
   check(nlayer>=2 && nlayer<=64,"invalid overlay layer count");
   check(at<rows.size() && rows[at].size()==4 && rows[at][0]=="LABELS","invalid LABELS");
@@ -736,7 +808,9 @@ void draw_hist_overlay(const std::vector<std::vector<std::string>> &rows,
       hist->SetBinContent(i,content);
       hist->SetBinError(i,std::sqrt(variance));
     }
+    read_hist_stats(rows,at,*hist);
     hist->SetStats(stats);
+    if(stats) hist->SetName(!s[3].empty() ? s[3].c_str() : k==1 ? box.name.c_str() : (box.name+" "+std::to_string(k)).c_str());
     int root_color=TColor::GetColor(s[4].c_str());
     hist->SetLineColor(root_color); hist->SetLineWidth(line_width); hist->SetLineStyle(line_style);
     hist->SetMarkerColor(root_color); hist->SetMarkerStyle(marker); hist->SetMarkerSize(marker_size);
@@ -755,8 +829,7 @@ void draw_hist_overlay(const std::vector<std::vector<std::string>> &rows,
   validate_scene(scene,logx,logy,hists.size());
   TCanvas canvas("rootplots_overlay_canvas","",width,height);
   apply_canvas(canvas,scene);
-  // SetBinContent does not preserve the original event count; omit Entries.
-  if(stats) gStyle->SetOptStat(1100);
+  if(stats) stats_begin(box);
   canvas.SetLogx(logx); canvas.SetLogy(logy);
   hists.front()->GetXaxis()->SetTitle(xlabel.c_str());
   hists.front()->GetYaxis()->SetTitle(ylabel.c_str());
@@ -788,11 +861,15 @@ void draw_hist_overlay(const std::vector<std::vector<std::string>> &rows,
   for(int k=0;k<nlayer;++k) hists[k]->Draw(options[k].c_str());
   std::vector<TObject*> objects;
   for(const auto &hist:hists) objects.push_back(hist.get());
-  auto decorations=draw_scene(scene,corner,objects,labels,std::vector<std::string>(hists.size(),"lep"));
+  // Layer 1 and SAMES layers own boxes; plain SAME layers have none, as in ROOT.
+  auto frozen=freeze_stats(canvas,box,objects,false);
+  stats_headroom(canvas,box,frozen.rect,hists.front().get(),objects);
+  auto decorations=draw_scene(scene,corner,objects,labels,std::vector<std::string>(hists.size(),"lep"),frozen.rect);
   TLatex heading;
   heading.SetNDC(); heading.SetTextSize(0.035);
-  if(!title.empty()) heading.DrawLatex(0.13,0.94,title.c_str());
+  if(!root_title(canvas,hists.front().get(),title,scene.canvas) && !title.empty()) heading.DrawLatex(0.13,0.94,title.c_str());
   canvas.Modified(); canvas.Update();
+  finish_canvas(canvas);
   canvas.SaveAs((stem+".png").c_str());
   canvas.SaveAs((stem+".pdf").c_str());
 }
@@ -812,6 +889,10 @@ void draw_fit(const std::vector<std::vector<std::string>> &rows, const std::stri
         corner=="bottomleft" || corner=="none","invalid legend");
   check(at<rows.size() && rows[at].size()==4 && rows[at][0]=="LABELS","invalid LABELS");
   auto title=rows[at][1],xlabel=rows[at][2],ylabel=rows[at][3]; ++at;
+  auto scene=read_scene(rows,at);
+  check(scene.lines.empty() && scene.texts.empty() && !scene.legend && scene.canvas[0]=="-" &&
+        scene.canvas[1]=="-" && scene.canvas[2]=="-" && scene.canvas[3]=="-" && scene.axes[0].bins.empty(),
+        "the fit/pull layout supports axis styles, grids, ticks and the title box only");
   std::vector<Series> series;
   for(int id=1;id<=3;++id) series.push_back(read_series(rows,at,id));
   check(at+1==rows.size() && rows[at].size()==2 && rows[at][0]=="END" &&
@@ -824,13 +905,18 @@ void draw_fit(const std::vector<std::vector<std::string>> &rows, const std::stri
   auto *top=new TPad("fit_top","",0,0.30,1,1);
   auto *bottom=new TPad("fit_bottom","",0,0,1,0.30);
   top->Draw(); bottom->Draw();
+  // A selected ROOT style keeps its side margins and ticks; its top/bottom
+  // margins and text sizes are rescaled to the pad heights (style_scaled_axis).
+  const bool styled=style_selected();
   for(auto *pad:{top,bottom}) {
-    pad->SetLeftMargin(0.14); pad->SetRightMargin(0.05);
-    pad->SetTicks(1,1); pad->SetLogx(logx);
+    if(!styled) { pad->SetLeftMargin(0.14); pad->SetRightMargin(0.05); pad->SetTicks(1,1); }
+    pad->SetLogx(logx);
   }
   top->SetLogy(logy);
-  top->SetTopMargin(0.09); top->SetBottomMargin(0.02);
-  bottom->SetTopMargin(0.03); bottom->SetBottomMargin(0.34);
+  top->SetTopMargin(styled ? gStyle->GetPadTopMargin()/0.70 : 0.09); top->SetBottomMargin(0.02);
+  bottom->SetTopMargin(0.03); bottom->SetBottomMargin(styled ? gStyle->GetPadBottomMargin()/0.30 : 0.34);
+  mark_two_pad(top); // before apply_canvas registers the label: its room is sized for the upper pad
+  for(auto *pad:{top,bottom}) apply_canvas(*pad,scene); // grids/ticks on both pads
   std::vector<std::unique_ptr<TGraph>> graphs;
   for(const auto &s:series) graphs.push_back(make_graph(s));
 
@@ -838,37 +924,51 @@ void draw_fit(const std::vector<std::vector<std::string>> &rows, const std::stri
   auto *upper=top->DrawFrame(xmin,ymin,xmax,ymax);
   upper->GetXaxis()->SetLabelSize(0); upper->GetXaxis()->SetTitleSize(0);
   upper->GetYaxis()->SetTitle(ylabel.c_str());
-  upper->GetYaxis()->SetTitleSize(0.052); upper->GetYaxis()->SetLabelSize(0.043);
-  upper->GetYaxis()->SetTitleOffset(1.15);
+  if(styled) { style_scaled_axis(upper->GetXaxis(),"X",top,true); style_scaled_axis(upper->GetYaxis(),"Y",top,false); }
+  else {
+    upper->GetYaxis()->SetTitleSize(0.052); upper->GetYaxis()->SetLabelSize(0.043);
+    upper->GetYaxis()->SetTitleOffset(1.15);
+  }
+  // The shared x style also applies to the upper pad, whose labels stay hidden.
+  apply_axis_spec(upper->GetXaxis(),scene.axes[0],"x");
+  upper->GetXaxis()->SetLabelSize(0); upper->GetXaxis()->SetTitleSize(0);
+  apply_axis_spec(upper->GetYaxis(),scene.axes[1],"y");
   graphs[0]->Draw(draw_option(series[0]).c_str());
   graphs[1]->Draw(draw_option(series[1]).c_str());
   std::unique_ptr<TLegend> legend;
-  if(corner!="none") {
-    double x1=corner.find("left")!=std::string::npos ? 0.17 : 0.67;
-    double y1=corner.find("bottom")!=std::string::npos ? 0.17 : 0.72;
-    legend=std::make_unique<TLegend>(x1,y1,x1+0.25,y1+0.16);
-    legend->SetBorderSize(0); legend->SetFillStyle(0);
+  std::vector<std::string> legend_labels;
+  for(int i=0;i<2;++i) if(!series[i].label.empty()) legend_labels.push_back(series[i].label);
+  if(corner!="none" && !legend_labels.empty()) {
+    // The upper pad is 70% of the canvas: 0.045 of it matches its 0.043 y labels.
+    legend=automatic_legend(corner,legend_labels,StatsRect(),styled ? 0.8*gStyle->GetLabelSize("X")*two_pad_text(top).k : 0.045);
     if(!series[0].label.empty()) legend->AddEntry(graphs[0].get(),series[0].label.c_str(),"l");
     if(!series[1].label.empty()) legend->AddEntry(graphs[1].get(),series[1].label.c_str(),"pe");
     legend->Draw();
   }
   TLatex heading;
   heading.SetNDC(); heading.SetTextSize(0.035);
-  if(!title.empty()) heading.DrawLatex(0.14,0.95,title.c_str());
+  if(!root_title(*top,upper,title,scene.canvas) && !title.empty()) heading.DrawLatex(0.14,0.95,title.c_str());
 
   bottom->cd();
   auto *lower=bottom->DrawFrame(xmin,pullmin,xmax,pullmax);
   lower->GetXaxis()->SetTitle(xlabel.c_str());
-  lower->GetXaxis()->SetTitleSize(0.12); lower->GetXaxis()->SetLabelSize(0.10);
-  lower->GetXaxis()->SetTitleOffset(1.05);
   lower->GetYaxis()->SetTitle("Pull");
-  lower->GetYaxis()->SetTitleSize(0.11); lower->GetYaxis()->SetLabelSize(0.09);
-  lower->GetYaxis()->SetTitleOffset(0.51); lower->GetYaxis()->SetNdivisions(505);
+  if(styled) { style_scaled_axis(lower->GetXaxis(),"X",bottom,true); style_scaled_axis(lower->GetYaxis(),"Y",bottom,false);
+               lower->GetYaxis()->CenterTitle(kTRUE); }
+  else {
+    lower->GetXaxis()->SetTitleSize(0.12); lower->GetXaxis()->SetLabelSize(0.10);
+    lower->GetXaxis()->SetTitleOffset(1.05);
+    lower->GetYaxis()->SetTitleSize(0.11); lower->GetYaxis()->SetLabelSize(0.09);
+    lower->GetYaxis()->SetTitleOffset(0.51);
+  }
+  lower->GetYaxis()->SetNdivisions(505);
+  apply_axis_spec(lower->GetXaxis(),scene.axes[0],"x");
   auto zero=std::make_unique<TLine>(xmin,0,xmax,0);
   zero->SetLineStyle(2); zero->SetLineColor(kGray+2); zero->Draw("SAME");
   graphs[2]->Draw(draw_option(series[2]).c_str());
 
   canvas.cd(); canvas.Modified(); canvas.Update();
+  finish_canvas(canvas);
   canvas.SaveAs((stem+".png").c_str());
   canvas.SaveAs((stem+".pdf").c_str());
 }
@@ -998,6 +1098,7 @@ void palette(const std::string &name) {
 }
 void save(TCanvas &canvas, const std::string &stem) {
   canvas.Modified(); canvas.Update();
+  finish_canvas(canvas);
   canvas.SaveAs((stem+".png").c_str());
   canvas.SaveAs((stem+".pdf").c_str());
 }
@@ -1021,6 +1122,7 @@ void draw_grid(const std::vector<std::vector<std::string>> &rows, const std::str
   check(theta>=0 && theta<=180 && phi>=-180 && phi<=180,"invalid view angles");
   bool logx=raw && bit(f[9]),logy=raw && bit(f[10]),logz=raw && bit(f[11]);
   auto labels=read_labels(rows,at);
+  auto scene=read_scene(rows,at);
   check(at<rows.size() && rows[at].size()==3 && rows[at][0]=="GRID","missing GRID");
   int nx=integer(rows[at][1]),ny=integer(rows[at][2]); ++at;
   check(nx>=1 && ny>=1 && nx<=2048 && ny<=2048 &&
@@ -1067,9 +1169,18 @@ void draw_grid(const std::vector<std::vector<std::string>> &rows, const std::str
   }
   TCanvas canvas("rootplots_grid_canvas","",width,height);
   canvas.SetLogx(logx); canvas.SetLogy(logy); canvas.SetLogz(logz);
-  canvas.SetLeftMargin(0.14); canvas.SetBottomMargin(0.13);
-  if(dim=="2d") canvas.SetRightMargin(raw || mode=="heatmap" ? 0.18 : 0.08);
+  // A selected ROOT style keeps its margins on flat 2-D views; a palette still gets room.
+  const bool style_margins=style_selected() && dim=="2d";
+  if(!style_margins) { canvas.SetLeftMargin(0.14); canvas.SetBottomMargin(0.13); }
+  if(dim=="2d") {
+    if(raw || mode=="heatmap") canvas.SetRightMargin(0.18);
+    else if(!style_margins) canvas.SetRightMargin(0.08);
+  }
   else { canvas.SetRightMargin(0.22); canvas.SetTheta(theta); canvas.SetPhi(phi); }
+  apply_canvas(canvas,scene); // explicit CanvasStyle values win over the layout defaults
+  apply_axes(&hist,scene);    // the z axis also styles the palette
+  if(dim=="2d") palette_title_room(canvas,&hist,raw ? flat_palette(mode,2) : mode=="heatmap",
+                                   scene.canvas,scene.axes[2].v[AX_TITLE_OFFSET]=="-");
   std::string upper=mode;
   std::transform(upper.begin(),upper.end(),upper.begin(),[](unsigned char c){return std::toupper(c);});
   hist.SetContour(raw ? (upper.find("CONT")!=std::string::npos ? contours :
@@ -1079,7 +1190,8 @@ void draw_grid(const std::vector<std::vector<std::string>> &rows, const std::str
             mode=="contour" ? "CONT3" : "SURF2Z");
   TLatex heading;
   heading.SetNDC(); heading.SetTextSize(0.035);
-  if(!labels.title.empty()) heading.DrawLatex(0.13,0.94,labels.title.c_str());
+  if(!root_title(canvas,&hist,labels.title,scene.canvas) && !labels.title.empty())
+    heading.DrawLatex(0.13,0.94,labels.title.c_str());
   save(canvas,stem);
 }
 void draw_grid_overlay(const std::vector<std::vector<std::string>> &rows,
@@ -1096,6 +1208,7 @@ void draw_grid_overlay(const std::vector<std::vector<std::string>> &rows,
   int nlayer=integer(f[8]);
   check(nlayer>=2 && nlayer<=32,"invalid grid overlay layer count");
   auto labels=read_labels(rows,at);
+  auto scene=read_scene(rows,at);
   std::vector<std::unique_ptr<TH2D>> grids;
   std::vector<std::string> options;
   for(int k=1;k<=nlayer;++k) {
@@ -1155,12 +1268,19 @@ void draw_grid_overlay(const std::vector<std::vector<std::string>> &rows,
   grids.front()->GetYaxis()->SetTitle(labels.y.c_str());
   grids.front()->GetZaxis()->SetTitle(labels.z.c_str());
   TCanvas canvas("rootplots_grid_overlay_canvas","",width,height);
-  canvas.SetLeftMargin(0.14); canvas.SetRightMargin(0.18); canvas.SetBottomMargin(0.13);
+  if(!style_selected()) { canvas.SetLeftMargin(0.14); canvas.SetBottomMargin(0.13); }
+  canvas.SetRightMargin(0.18);
   canvas.SetLogx(logx); canvas.SetLogy(logy); canvas.SetLogz(logz);
+  apply_canvas(canvas,scene);
+  apply_axes(grids.front().get(),scene);
+  palette_title_room(canvas,grids.front().get(),
+                     std::any_of(options.begin(),options.end(),[](const std::string &o){return flat_palette(o,2);}),
+                     scene.canvas,scene.axes[2].v[AX_TITLE_OFFSET]=="-");
   for(int k=0;k<nlayer;++k) grids[k]->Draw(options[k].c_str());
   TLatex heading;
   heading.SetNDC(); heading.SetTextSize(0.035);
-  if(!labels.title.empty()) heading.DrawLatex(0.13,0.94,labels.title.c_str());
+  if(!root_title(canvas,grids.front().get(),labels.title,scene.canvas) && !labels.title.empty())
+    heading.DrawLatex(0.13,0.94,labels.title.c_str());
   save(canvas,stem);
 }
 void draw_volume(const std::vector<std::vector<std::string>> &rows, const std::string &stem) {
@@ -1176,6 +1296,7 @@ void draw_volume(const std::vector<std::vector<std::string>> &rows, const std::s
   check(theta>=0 && theta<=180 && phi>=-180 && phi<=180,"invalid view angles");
   bool logx=bit(f[7]),logy=bit(f[8]),logz=bit(f[9]);
   auto labels=read_labels(rows,at);
+  auto scene=read_scene(rows,at);
   check(at<rows.size() && rows[at].size()==4 && rows[at][0]=="VOLUME","missing VOLUME");
   int nx=integer(rows[at][1]),ny=integer(rows[at][2]),nz=integer(rows[at][3]); ++at;
   check(nx>=1 && ny>=1 && nz>=1 && nx<=256 && ny<=256 && nz<=256 &&
@@ -1216,10 +1337,13 @@ void draw_volume(const std::vector<std::vector<std::string>> &rows, const std::s
   canvas.SetLeftMargin(0.13); canvas.SetRightMargin(0.18); canvas.SetBottomMargin(0.13);
   canvas.SetTheta(theta); canvas.SetPhi(phi);
   canvas.SetLogx(logx); canvas.SetLogy(logy); canvas.SetLogz(logz);
+  apply_canvas(canvas,scene);
+  apply_axes(&hist,scene);
   hist.Draw(option.c_str());
   TLatex heading;
   heading.SetNDC(); heading.SetTextSize(0.035);
-  if(!labels.title.empty()) heading.DrawLatex(0.13,0.94,labels.title.c_str());
+  if(!root_title(canvas,&hist,labels.title,scene.canvas) && !labels.title.empty())
+    heading.DrawLatex(0.13,0.94,labels.title.c_str());
   save(canvas,stem);
 }
 struct FunctionDrawing {
@@ -1275,7 +1399,7 @@ FunctionDrawing paint_function(const std::vector<std::vector<std::string>> &rows
   out.decorations=draw_scene(scene,corner,{out.function.get()},{v[6]},{"l"});
   out.heading=std::make_unique<TLatex>();
   out.heading->SetNDC(); out.heading->SetTextSize(0.035);
-  if(!title.empty()) out.heading->DrawLatex(0.13,0.94,title.c_str());
+  if(!root_title(pad,frame,title,scene.canvas) && !title.empty()) out.heading->DrawLatex(0.13,0.94,title.c_str());
   return out;
 }
 void draw_function(const std::vector<std::vector<std::string>> &rows,const std::string &stem) {
@@ -1329,6 +1453,7 @@ XYZDrawing paint_xyz(const std::vector<std::vector<std::string>> &rows,TPad &pad
   }
   check(ntoken>0 && (!triangles || interpolate),"XYZ interpolation needs explicit opt-in");
   auto labels=read_labels(rows,at);
+  auto scene=read_scene(rows,at);
   check(at<rows.size() && rows[at].size()==2 && rows[at][0]=="XYZ","missing XYZ");
   int n=integer(rows[at++][1]);
   check(n>=1 && n<=1000000,"invalid XYZ point count");
@@ -1385,14 +1510,17 @@ XYZDrawing paint_xyz(const std::vector<std::vector<std::string>> &rows,TPad &pad
   pad.cd();
   pad.SetLeftMargin(0.14); pad.SetBottomMargin(0.13);
   pad.SetRightMargin(0.20); pad.SetTheta(theta); pad.SetPhi(phi);
+  apply_canvas(pad,scene);
   if(triangles) graph.GetHistogram()->SetContour(contours);
   graph.Draw(option.c_str());
   graph.GetXaxis()->SetTitle(labels.x.c_str());
   graph.GetYaxis()->SetTitle(labels.y.c_str());
   graph.GetZaxis()->SetTitle(labels.z.c_str());
+  apply_axis_set(graph.GetXaxis(),graph.GetYaxis(),graph.GetZaxis(),scene);
   out.heading=std::make_unique<TLatex>();
   out.heading->SetNDC(); out.heading->SetTextSize(0.035);
-  if(!labels.title.empty()) out.heading->DrawLatex(0.13,0.94,labels.title.c_str());
+  if(root_title(pad,dynamic_cast<TH1*>(graph.GetXaxis()->GetParent()),labels.title,scene.canvas)) graph.SetTitle(labels.title.c_str());
+  else if(!labels.title.empty()) out.heading->DrawLatex(0.13,0.94,labels.title.c_str());
   return out;
 }
 void draw_xyz(const std::vector<std::vector<std::string>> &rows, const std::string &stem) {
@@ -1445,14 +1573,67 @@ int image_diff(const char *left,const char *right) {
   std::cout<<"DIFF\t"<<w<<'\t'<<h<<'\t'<<maxdiff<<'\t'<<total/(3.0*w*h)<<'\t'<<changed<<'\n';
   return 0;
 }
+// "CHROMA width height colored_pixels": pixels whose RGB channels differ by
+// more than 32/255 (anything but black, white, and grey anti-aliasing).
+int image_chroma(const char *path) {
+  gROOT->SetBatch(kTRUE);
+  quiet_root();
+  std::unique_ptr<TImage> a(TImage::Open(path));
+  check(a && a->IsValid(),"cannot read image");
+  const unsigned w=a->GetWidth(), h=a->GetHeight();
+  const UInt_t *p=a->GetArgbArray();
+  check(p!=nullptr,"cannot decode image pixels");
+  unsigned long long colored=0;
+  for(size_t i=0;i<size_t(w)*h;++i) {
+    const int r=int((p[i]>>16)&0xff),g=int((p[i]>>8)&0xff),b=int(p[i]&0xff);
+    if(std::max({r,g,b})-std::min({r,g,b})>32) ++colored;
+  }
+  std::cout<<"CHROMA\t"<<w<<'\t'<<h<<'\t'<<colored<<'\n';
+  return 0;
+}
+// "INK width height xmin ymin xmax ymax": bounding box (pixels, top-left
+// origin) of the dark pixels (a channel below 160/255: text, lines, fills) in
+// the rectangle x0..x1, y0..y1 (whole image by default); -1 when there are none.
+int image_ink(const char *path,long x0,long y0,long x1,long y1) {
+  gROOT->SetBatch(kTRUE);
+  quiet_root();
+  std::unique_ptr<TImage> a(TImage::Open(path));
+  check(a && a->IsValid(),"cannot read image");
+  const long w=a->GetWidth(), h=a->GetHeight();
+  const UInt_t *p=a->GetArgbArray();
+  check(p!=nullptr,"cannot decode image pixels");
+  if(x0<0) { x0=0; y0=0; x1=w-1; y1=h-1; }
+  check(x0<=x1 && y0<=y1 && x1<w && y1<h,"invalid image region");
+  long xmin=-1,ymin=-1,xmax=-1,ymax=-1;
+  for(long y=y0;y<=y1;++y) for(long x=x0;x<=x1;++x) {
+    const UInt_t c=p[size_t(y)*w+x];
+    if(std::min({int((c>>16)&0xff),int((c>>8)&0xff),int(c&0xff)})>=160) continue;
+    if(xmin<0 || x<xmin) xmin=x;
+    if(x>xmax) xmax=x;
+    if(ymin<0) ymin=y;
+    ymax=y;
+  }
+  std::cout<<"INK\t"<<w<<'\t'<<h<<'\t'<<xmin<<'\t'<<ymin<<'\t'<<xmax<<'\t'<<ymax<<'\n';
+  return 0;
+}
 int main(int argc,char **argv) {
   try {
+    if((argc==3 || argc==7) && std::string(argv[1])=="--image-ink")
+      return argc==3 ? image_ink(argv[2],-1,-1,-1,-1)
+                     : image_ink(argv[2],std::stol(argv[3]),std::stol(argv[4]),std::stol(argv[5]),std::stol(argv[6]));
     if(argc==4 && std::string(argv[1])=="--image-diff") return image_diff(argv[2],argv[3]);
-    check(argc==3,"usage: rootplots-graphfit input.tsv output | --image-diff a.png b.png");
+    if(argc==3 && std::string(argv[1])=="--image-chroma") return image_chroma(argv[2]);
+    if(argc==2 && std::string(argv[1])=="--styles") {
+      gROOT->SetBatch(kTRUE); quiet_root();
+      for(const auto &name:available_styles()) std::cout<<name<<'\n';
+      return 0;
+    }
+    check(argc==3,"usage: rootplots-graphfit input.tsv output | --styles | --image-diff a.png b.png | --image-chroma a.png | --image-ink a.png [x0 y0 x1 y1]");
     gROOT->SetBatch(kTRUE);
     quiet_root();
     gStyle->SetOptStat(0); gStyle->SetOptFit(0); gStyle->SetOptTitle(0);
     auto rows=read_input(argv[1]);
+    select_requested_style(rows,"ROOTSTYLE"); // before any canvas or histogram is created
     if(rows[0][0]=="DRAW") draw(rows,argv[2]);
     else if(rows[0][0]=="DRAWHIST" || rows[0][0]=="DRAWHISTRAW") draw_hist(rows,argv[2]);
     else if(rows[0][0]=="DRAWHISTOVERLAY") draw_hist_overlay(rows,argv[2]);

@@ -187,7 +187,7 @@ function validate_poly(p::PolygonHist2D)
     return p
 end
 
-function advanced_header(io,command,data,spec;draw,stats=false)
+function advanced_header(io,command,data,spec;draw,request=stats_request())
     dim=data isa AbstractRootProfile ? length(profile_edges(data)) : data isa HistStack ? 1 : 2
     logz=spec isa GraphSpec ? false : spec.logz
     palette=spec isa GraphSpec ? :viridis : spec.palette
@@ -200,18 +200,19 @@ function advanced_header(io,command,data,spec;draw,stats=false)
     error=data isa AbstractRootProfile ? String(data.error) : "-"
     println(io,join((command,spec.size...,dim,root_draw_option(draw),Int(spec.logx),Int(spec.logy),Int(logz),
         palette,contours,theta,phi,Int(spec isa GraphSpec && spec.xlimits!==nothing),xl...,
-        Int(spec isa GraphSpec && spec.ylimits!==nothing),yl...,Int(stats),count,error,
+        Int(spec isa GraphSpec && spec.ylimits!==nothing),yl...,Int(stats_active(request)),count,error,
         spec isa GraphSpec ? String(spec.legend) : "none"),'\t'))
+    write_stats_row(io,request)
     zlabel=spec isa GraphSpec ? "" : spec.zlabel
     println(io,join(("LABELS",(scene_text(s) for s in (spec.title,spec.xlabel,spec.ylabel,zlabel))...),'\t'))
-    spec isa GraphSpec && write_scene(io,spec)
+    write_scene(io,spec)
 end
 
-function write_advanced_spec(path,data,spec;draw,stats=false,command=nothing)
+function write_advanced_spec(path,data,spec;draw,request=stats_request(),command=nothing)
     command===nothing && (command=data isa HistStack ? "DRAWSTACK" : data isa PolygonHist2D ? "DRAWPOLY" : "DRAWPROFILE")
     open(path,"w") do io
         println(io,"ROOTPlotsGraph\t1")
-        advanced_header(io,command,data,spec;draw,stats)
+        advanced_header(io,command,data,spec;draw,request)
         if data isa HistStack
             for (k,h) in enumerate(data.hists)
                 s=data.styles[k]
@@ -268,11 +269,28 @@ function validate_advanced(data,spec,draw)
     for i in eachindex(edges)
         logs[i] && edges[i]<=0 && throw(ArgumentError("log coordinate axis needs positive bin edges"))
     end
+    if data isa HistStack
+        check_spec_bins(spec,"a THStack",length(first(data.hists).sumw))
+    elseif data isa PolygonHist2D
+        check_spec_bins(spec,"a TH2Poly")
+    else
+        check_spec_bins(spec,"a profile",(length(e)-1 for e in profile_edges(data))...)
+    end
     return data
 end
 
+"""Statistics-box request for stacks (refused, as ROOT draws none), profiles, and TH2Poly."""
+advanced_stats_request(data, spec; stats=false, stats_position=:auto, stats_name=nothing,
+                       stats_headroom=false) =
+    stats_request(; stats, stats_position, allow_stats=!(data isa HistStack), what="THStack",
+                  stats_headroom, one_dimensional=data isa Profile1D,
+                  ylimits=spec isa GraphSpec ? spec.ylimits : nothing,
+                  name=stats_header(stats_name, "", data isa AbstractRootProfile ? "Profile" : "Histogram"))
+
 """Validate and serialize a standalone advanced plot without executing ROOT (layout helper)."""
-function write_advanced_plot(path,data,spec;draw=nothing,stats=false)
+function write_advanced_plot(path,data,spec;draw=nothing,stats=false,stats_position=:auto,stats_name=nothing,
+                             stats_headroom=false)
+    request=advanced_stats_request(data,spec;stats,stats_position,stats_name,stats_headroom)
     option=if draw!==nothing
         String(draw)
     elseif data isa HistStack
@@ -289,18 +307,20 @@ function write_advanced_plot(path,data,spec;draw=nothing,stats=false)
         throw(ArgumentError("this advanced plot needs a ROOT draw option string"))
     end
     validate_advanced(data,spec,option)
-    return write_advanced_spec(path,data,spec;draw=option,stats)
+    return write_advanced_spec(path,data,spec;draw=option,request)
 end
 
-function render_advanced(data,spec,outstem;draw,format=:png,stats=false,root_config=nothing)
+function render_advanced(data,spec,outstem;draw,format=:png,stats=false,stats_position=:auto,
+                         stats_name=nothing,stats_headroom=false,root_config=nothing)
     paths=plot_output_paths(outstem,format)
+    request=advanced_stats_request(data,spec;stats,stats_position,stats_name,stats_headroom)
     validate_advanced(data,spec,draw)
     config=find_root_config(root_config)
     config===nothing && throw(ArgumentError("local native ROOT not found"))
     exe=graphfit_executable(config)
     mkpath(dirname(outstem))
     mktempdir() do dir
-        input=write_advanced_spec(joinpath(dir,"advanced.tsv"),data,spec;draw,stats)
+        input=write_advanced_spec(joinpath(dir,"advanced.tsv"),data,spec;draw,request)
         stem=joinpath(dir,"rendered")
         run(Cmd([exe,input,stem]))
         move_plot_outputs(stem,paths)
@@ -308,27 +328,50 @@ function render_advanced(data,spec,outstem;draw,format=:png,stats=false,root_con
     return paths
 end
 
+"""
+    render_root(stack::HistStack, spec::GraphSpec, outstem; draw=stack.draw, format=:png)
+
+Draw a native THStack. ROOT draws no statistics box for a stack, so `stats`
+other than `false` is rejected; draw a single layer to show its statistics.
+"""
 render_root(data::HistStack,spec::GraphSpec,outstem::AbstractString;
             draw=data.draw,format=:png,stats=false,root_config=nothing)=
     render_advanced(data,spec,outstem;draw=String(draw),format,stats,root_config)
+
+"""
+    render_root(profile::Profile1D, spec::GraphSpec, outstem; draw="E1", stats=false,
+                stats_position=:auto, stats_name=nothing, stats_headroom=false, format=:png)
+
+Draw a native TProfile (black error bars and markers). `stats=true` shows
+ROOT's default profile box (name, Entries, Mean, Mean y, Std Dev, Std Dev y);
+other values as in [`stats_option`](@ref). `stats_name` sets the header
+(default `"Profile"`). `stats_headroom=true` raises the automatic y maximum
+so the profile stays below the box.
+"""
 render_root(data::Profile1D,spec::GraphSpec,outstem::AbstractString;
-            draw="E1",format=:png,stats=false,root_config=nothing)=
-    render_advanced(data,spec,outstem;draw=String(draw),format,stats,root_config)
+            draw="E1",format=:png,stats=false,stats_position=:auto,stats_name=nothing,
+            stats_headroom=false,root_config=nothing)=
+    render_advanced(data,spec,outstem;draw=String(draw),format,stats,stats_position,stats_name,
+                    stats_headroom,root_config)
+
+"""Draw a native TProfile2D or TH2Poly; statistics-box keywords as for `Profile1D`."""
 function render_root(data::Union{Profile2D,PolygonHist2D},spec::Graph2DSpec,outstem::AbstractString;
-                     format=:png,stats=false,root_config=nothing)
+                     format=:png,stats=false,stats_position=:auto,stats_name=nothing,root_config=nothing)
     draw=spec.draw isa AbstractString ? spec.draw : spec.draw==:heatmap ? "COLZ" : "CONT3"
-    return render_advanced(data,spec,outstem;draw,format,stats,root_config)
+    return render_advanced(data,spec,outstem;draw,format,stats,stats_position,stats_name,root_config)
 end
+"""Draw a native TProfile2D surface; statistics-box keywords as for `Profile1D`."""
 function render_root(data::Profile2D,spec::Graph3DSpec,outstem::AbstractString;
-                     format=:png,stats=false,root_config=nothing)
+                     format=:png,stats=false,stats_position=:auto,stats_name=nothing,root_config=nothing)
     spec.draw isa AbstractString || spec.draw==:surface || throw(ArgumentError("Profile2D needs :surface or ROOT draw string"))
     draw=spec.draw isa AbstractString ? spec.draw : "SURF2Z"
-    return render_advanced(data,spec,outstem;draw,format,stats,root_config)
+    return render_advanced(data,spec,outstem;draw,format,stats,stats_position,stats_name,root_config)
 end
+"""Draw a native TProfile3D; statistics-box keywords as for `Profile1D`."""
 function render_root(data::Profile3D,spec::Graph3DSpec,outstem::AbstractString;
-                     format=:png,stats=false,root_config=nothing)
+                     format=:png,stats=false,stats_position=:auto,stats_name=nothing,root_config=nothing)
     spec.draw isa AbstractString || throw(ArgumentError("Profile3D needs a ROOT draw string, e.g. BOX2Z"))
-    return render_advanced(data,spec,outstem;draw=spec.draw,format,stats,root_config)
+    return render_advanced(data,spec,outstem;draw=spec.draw,format,stats,stats_position,stats_name,root_config)
 end
 
 """Read native visible-bin profile means/errors without a ROOT file.

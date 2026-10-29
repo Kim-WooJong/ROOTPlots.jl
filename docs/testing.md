@@ -37,7 +37,7 @@ releases, so references are environment-specific by design.
 
 | Date | OS | Julia | ROOT | Result |
 | --- | --- | --- | --- | --- |
-| 2026-10-29 | macOS (arm64) | 1.12.6 | 6.40.04 | full native suite incl. graph extensions (978/978), visual references recorded here |
+| 2026-10-29 | macOS (arm64) | 1.12.6 | 6.40.04 | full native suite incl. experiment styles (1350/1350), visual references recorded here |
 | 2026-10-29 | Linux EL9 (x86_64), LCG_110 clang 22 | 1.12.2 | 6.40.02 | doctor PASS; full native suite 818/818, visual comparison skipped (different reference environment) |
 
 | 2026-10-29 | GitHub Actions, ubuntu-latest | 1.11, 1 (rootless); 1 (native) | conda-forge 6.40 | all 3 CI jobs passed (before the bent/multi-error, TF2/TF3, polygon, and nested-layout additions) |

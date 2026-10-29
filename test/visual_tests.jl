@@ -44,6 +44,9 @@ function visual_cases()
         "figure_2x2" => stem -> render_root(PlotFigure([PlotPanel(h, small), PlotPanel(grid, Graph2DSpec()),
                                                         PlotPanel(stack, small), PlotPanel([data, model], small)];
                                                        layout=(2, 2), size=(800, 600)), stem),
+        "cms_style" => stem -> render_root(h, GraphSpec(xlabel="x", ylabel="Counts", size=(500, 400), legend=:none,
+                                                        style=:CMS, cms_label=(lumi="1 fb^{-1}", energy="13 TeV")),
+                                           stem; draw=:e1),
     ]
 end
 

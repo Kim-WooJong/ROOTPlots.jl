@@ -27,7 +27,30 @@ struct Component
     end
 end
 
-"""Caller-provided panel labels. `annotation` and `lumi` are descriptive text, never inferred physics claims; object owns only text."""
+"""
+    PanelSpec(xlabel; ylabel="Events", annotation="", lumi="", logx=false, logy=false,
+              ratio_logy=false, ymin=nothing, ymax=nothing, ratio_limits=nothing,
+              xaxis=AxisStyle(), yaxis=AxisStyle(), ratio_yaxis=AxisStyle(), canvas=CanvasStyle(),
+              style=nothing, cms_label=nothing, atlas_label=nothing)
+
+One stacked comparison panel with its ratio pad. Caller-provided labels:
+`annotation` and `lumi` are descriptive text, never inferred physics claims.
+
+- `xlabel`, `ylabel`: axis titles (x on the ratio pad, y on the upper pad).
+- `logx` (both pads), `logy` (upper pad), `ratio_logy` (ratio pad): `TPad::SetLogx/SetLogy`.
+- `ymin`, `ymax`, `ratio_limits`: physical-coordinate ranges (never logarithms).
+- `xaxis`: [`AxisStyle`](@ref) of the shared x axis (drawn on the ratio pad; the upper
+  pad keeps hidden labels); `yaxis`: upper-pad y axis; `ratio_yaxis`: ratio-pad y axis.
+  `xaxis.bin_labels` label the comparison bins.
+- `canvas`: [`CanvasStyle`](@ref) with `grid_x`, `grid_y`, `ticks_x`, `ticks_y` (both
+  pads). The comparison layout owns margins, titles, and global settings.
+- `style`, `cms_label`, `atlas_label`: ROOT style and experiment label as in
+  [`GraphSpec`](@ref) (panels of one figure must name the same style). With a style
+  or a label, both pads take the style's margins, ticks and text sizes rescaled
+  to the pad heights, and the legend moves into the frame. A label carries the
+  panel texts: `lumi` is the CMS luminosity text (or the ATLAS second line) unless
+  the label gives `lumi`/`energy`, and `annotation` is drawn as a line below it.
+"""
 struct PanelSpec
     xlabel::String
     ylabel::String
@@ -39,15 +62,56 @@ struct PanelSpec
     ymin::Union{Nothing,Float64}
     ymax::Union{Nothing,Float64}
     ratio_limits::Union{Nothing,Tuple{Float64,Float64}}
+    xaxis::AxisStyle
+    yaxis::AxisStyle
+    ratio_yaxis::AxisStyle
+    canvas::CanvasStyle
+    style::Union{Nothing,Symbol}
+    cms_label::Union{Nothing,Bool,NamedTuple}
+    atlas_label::Union{Nothing,Bool,NamedTuple}
 end
+
+# The original ten- and fourteen-field positional forms remain valid.
+PanelSpec(xlabel, ylabel, annotation, lumi, logx, logy, ratio_logy, ymin, ymax, ratio_limits) =
+    PanelSpec(xlabel, ylabel, annotation, lumi, logx, logy, ratio_logy, ymin, ymax, ratio_limits,
+              AxisStyle(), AxisStyle(), AxisStyle(), CanvasStyle())
+PanelSpec(xlabel, ylabel, annotation, lumi, logx, logy, ratio_logy, ymin, ymax, ratio_limits,
+          xaxis, yaxis, ratio_yaxis, canvas) =
+    PanelSpec(xlabel, ylabel, annotation, lumi, logx, logy, ratio_logy, ymin, ymax, ratio_limits,
+              xaxis, yaxis, ratio_yaxis, canvas, nothing, nothing, nothing)
 
 function PanelSpec(xlabel::AbstractString; ylabel="Events", annotation="", lumi="",
                    logx=false, logy=false, ratio_logy=false, ymin=nothing, ymax=nothing,
-                   ratio_limits=nothing)
+                   ratio_limits=nothing, xaxis=AxisStyle(), yaxis=AxisStyle(),
+                   ratio_yaxis=AxisStyle(), canvas=CanvasStyle(), style=nothing, cms_label=nothing,
+                   atlas_label=nothing)
     limits = ratio_limits === nothing ? nothing : (Float64(ratio_limits[1]), Float64(ratio_limits[2]))
     return PanelSpec(String(xlabel), String(ylabel), String(annotation), String(lumi),
                      logx, logy, ratio_logy, isnothing(ymin) ? nothing : Float64(ymin),
-                     isnothing(ymax) ? nothing : Float64(ymax), limits)
+                     isnothing(ymax) ? nothing : Float64(ymax), limits, xaxis, yaxis, ratio_yaxis, canvas,
+                     style, cms_label, atlas_label)
+end
+
+const PANEL_CANVAS_FIELDS = (:grid_x, :grid_y, :ticks_x, :ticks_y)
+has_panel_axes(spec::PanelSpec) = spec.xaxis != AxisStyle() || spec.yaxis != AxisStyle() ||
+    spec.ratio_yaxis != AxisStyle() || spec.canvas != CanvasStyle()
+
+"""Validate the comparison-panel axis styles for a panel with `nbins` bins."""
+function validate_panel_axes(spec::PanelSpec, nbins)
+    validate_axis(spec.xaxis; name=:x); validate_axis(spec.yaxis; name=:y)
+    validate_axis(spec.ratio_yaxis; name=:ratio)
+    validate_canvas(spec.canvas)
+    unsupported = [f for f in fieldnames(CanvasStyle) if !(f in PANEL_CANVAS_FIELDS) && getfield(spec.canvas, f) !== nothing]
+    isempty(unsupported) ||
+        throw(ArgumentError("PanelSpec canvas supports $(join(PANEL_CANVAS_FIELDS, ", ")); the comparison layout owns $(join(unsupported, ", "))"))
+    validate_style_and_label(spec)
+    check_axis_bins(spec.xaxis, nbins, :x, "the comparison panel")
+    check_axis_bins(spec.yaxis, nothing, :y, "the comparison panel")
+    check_axis_bins(spec.ratio_yaxis, nothing, :ratio, "the comparison panel")
+    ys = filter(!isnothing, [spec.yaxis.exponent_offset, spec.ratio_yaxis.exponent_offset])
+    length(unique(ys)) <= 1 ||
+        throw(ArgumentError("yaxis and ratio_yaxis exponent_offset differ (TGaxis::SetExponentOffset is global)"))
+    return spec
 end
 
 PanelSpec(xlabel::AbstractString, ylabel::AbstractString, annotation::AbstractString,

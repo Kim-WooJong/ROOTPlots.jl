@@ -289,15 +289,16 @@ render_root(s::ErrorGraph, spec::GraphSpec, outstem::AbstractString; format=:png
     render_root([s], spec, outstem; format, root_config)
 
 """
-    render_root(layers::AbstractVector, spec::GraphSpec, outstem; format=:png, root_config=nothing)
+    render_root(layers::AbstractVector, spec::GraphSpec, outstem; format=:png, root_config=nothing, kwargs...)
 
 Draw mixed XY layers (`GraphSeries`, `BentErrorSeries`, `MultiErrorSeries`,
 `ModelCurve`, `Hist1D`) on one pad. Equivalent to
-`render_root(PlotPanel(layers, spec), outstem)`; vectors containing only
+`render_root(PlotPanel(layers, spec; kwargs...), outstem)`, so panel keywords
+such as `stats`, `fitstats`, and `attached_fit` apply; vectors containing only
 `GraphSeries` or only `Hist1D` keep their dedicated methods.
 """
 function render_root(layers::AbstractVector, spec::GraphSpec, outstem::AbstractString;
-                     format=:png, root_config=nothing)
+                     format=:png, root_config=nothing, kwargs...)
     panel_layers(layers)  # rejects unsupported layer types before any output
-    return render_root(PlotFigure([PlotPanel(collect(layers), spec)]; size=spec.size), outstem; format, root_config)
+    return render_root(PlotFigure([PlotPanel(collect(layers), spec; kwargs...)]; size=spec.size), outstem; format, root_config)
 end

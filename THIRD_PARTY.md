@@ -12,6 +12,12 @@ No ROOT distribution or precompiled ROOT libraries are bundled here.
 | DataFrames.jl | Table-to-histogram adapters and analysis | [MIT](https://github.com/JuliaData/DataFrames.jl) |
 | CSV.jl | Read/write input tables | [MIT](https://github.com/JuliaData/CSV.jl) |
 
+The `"CMS"` plot style (`backend/root/experiment.hpp`) is original code written with
+ROOT `TStyle` setters; its values follow the publicly documented CMS publication
+style conventions, and no CMS software is included. `"ATLAS"` is ROOT's built-in
+style. The CMS and ATLAS labels are for collaboration use under each
+collaboration's publication rules; the package only provides the styling.
+
 Julia's standard libraries and transitive dependencies retain their own licenses.
 When redistributing a ROOT runtime or compiled binaries, check the corresponding
 upstream component and redistribution requirements separately. Source-only

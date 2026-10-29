@@ -107,7 +107,7 @@ SpecialDrawing paint_special(const std::vector<std::vector<std::string>>& rows,T
   // Only the displayed object participates in the one-series scene contract.
   refs.resize(1);
   out.decorations=draw_scene(s.scene,s.corner,refs,{""},{"l"});
-  if(!s.title.empty()) { auto heading=std::make_unique<TLatex>(0.13,0.94,s.title.c_str()); heading->SetNDC(); heading->SetTextSize(.035); heading->Draw(); out.objects.push_back(std::move(heading)); }
+  if(!root_title(pad,frame,s.title,s.scene.canvas) && !s.title.empty()) { auto heading=std::make_unique<TLatex>(0.13,0.94,s.title.c_str()); heading->SetNDC(); heading->SetTextSize(.035); heading->Draw(); out.objects.push_back(std::move(heading)); }
   return out;
 }
 bool special_dispatch(const std::vector<std::vector<std::string>>& rows,const std::string &output) {

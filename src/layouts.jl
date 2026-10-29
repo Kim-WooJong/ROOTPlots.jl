@@ -1,4 +1,21 @@
-"""One native ROOT pad. Data/spec are read-shared; do not mutate them while rendering."""
+"""
+    PlotPanel(data, spec; primitives=PlotPrimitive[], kwargs...)
+
+One native ROOT pad. Data/spec are read-shared; do not mutate them while rendering.
+
+Axis/canvas keywords for histogram, grid and graph-layer panels: `xaxis`, `yaxis`,
+`zaxis` ([`AxisStyle`](@ref)) and `canvas` ([`CanvasStyle`](@ref)) replace the spec's
+fields of the same name; `xlimits`, `ylimits`, `zlimits` set the drawn ranges.
+
+Statistics/fit-box keywords for histogram and graph panels: `stats` (box of the
+first histogram layer; Hist1D, Hist2D, Hist3D, profiles, TH2Poly; see
+[`stats_option`](@ref)), `fitstats` and `attached_fit` (a `FitResult` attached
+as a native TF1 to the first `Hist1D` layer, or else the first `GraphSeries`
+layer; see [`fit_option`](@ref)), `fit_label`, `stats_position`,
+`stats_name` (default: the layer label), and `stats_headroom` (1-D panels:
+raise the automatic y maximum so the data stay below the box). Each panel keeps
+its own box settings.
+"""
 struct PlotPanel{D,S,K}
     data::D
     spec::S
@@ -9,8 +26,9 @@ PlotPanel(data, spec; primitives=PlotPrimitive[], kwargs...) =
     PlotPanel(data, spec, (; kwargs...), PlotPrimitive[primitives...])
 
 """
-    PlotFigure(cells; layout=(1, length(cells)), size=(1000, 700), widths=nothing, heights=nothing)
-    PlotFigure(cells::AbstractMatrix; size=(1000, 700), widths=nothing, heights=nothing)
+    PlotFigure(cells; layout=(1, length(cells)), size=(1000, 700), widths=nothing, heights=nothing,
+               style=nothing)
+    PlotFigure(cells::AbstractMatrix; size=(1000, 700), widths=nothing, heights=nothing, style=nothing)
 
 Grid of native ROOT pads on one canvas, in row-major order (no raster
 composition). Each cell is a [`PlotPanel`](@ref) or another `PlotFigure`; a
@@ -22,6 +40,11 @@ nested figure is ignored; only the outermost figure sets the canvas size.
 columns/rows proportionally wider/taller; omitted weights give ROOT's regular
 `Divide` grid. A figure holds at most 64 panels in total, with 1:16 rows/columns
 per grid.
+
+`style` selects one ROOT `TStyle` for the whole canvas (`gROOT->SetStyle` is
+process-global): it is given to every panel whose spec has no `style`, so with
+`style=:CMS` each such panel also gets the CMS label (`cms_label=false` in a
+panel spec switches it off). Panel specs that name a style must all agree.
 """
 struct PlotFigure
     panels::Vector{Union{PlotPanel,PlotFigure}}
@@ -29,7 +52,9 @@ struct PlotFigure
     size::Tuple{Int,Int}
     widths::Union{Nothing,Vector{Float64}}
     heights::Union{Nothing,Vector{Float64}}
-    function PlotFigure(panels; layout=(1,length(panels)), size=(1000,700), widths=nothing, heights=nothing)
+    style::Union{Nothing,Symbol}
+    function PlotFigure(panels; layout=(1,length(panels)), size=(1000,700), widths=nothing, heights=nothing,
+                        style=nothing)
         all(p -> p isa Union{PlotPanel,PlotFigure}, panels) ||
             throw(ArgumentError("figure cells must be PlotPanel or PlotFigure values"))
         p = Union{PlotPanel,PlotFigure}[panels...]
@@ -42,15 +67,39 @@ struct PlotFigure
         weights(w, n, name) = w === nothing ? nothing :
             (length(w) == n && all(v -> v isa Real && isfinite(v) && v > 0, w) && maximum(w)/minimum(w) <= 100 ?
              Float64.(collect(w)) : throw(ArgumentError("$name needs $n finite positive weights (max/min ≤ 100)")))
+        check_style_name(style)
         figure = new(p, (Int(rows),Int(cols)), (Int(size[1]),Int(size[2])),
-                     weights(widths, Int(cols), "widths"), weights(heights, Int(rows), "heights"))
+                     weights(widths, Int(cols), "widths"), weights(heights, Int(rows), "heights"), style)
         figure_depth(figure) <= 4 || throw(ArgumentError("figures can be nested at most 4 levels deep"))
         length(figure_leaves(figure)) <= 64 || throw(ArgumentError("a figure holds at most 64 panels in total"))
         return figure
     end
 end
-PlotFigure(panels::AbstractMatrix; size=(1000,700), widths=nothing, heights=nothing) =
-    PlotFigure(vec(permutedims(panels)); layout=Base.size(panels), size, widths, heights)
+PlotFigure(panels::AbstractMatrix; size=(1000,700), widths=nothing, heights=nothing, style=nothing) =
+    PlotFigure(vec(permutedims(panels)); layout=Base.size(panels), size, widths, heights, style)
+
+"""
+Give the figure's `style` (inherited by nested figures) to every panel spec without
+one, then check that all panels name the same style (gROOT->SetStyle is global).
+"""
+function styled_figure(f::PlotFigure, inherited=nothing)
+    style = f.style === nothing ? inherited : f.style
+    cells = map(f.panels) do cell
+        cell isa PlotFigure && return styled_figure(cell, style)
+        (style === nothing || !hasproperty(cell.spec, :style) || cell.spec.style !== nothing) && return cell
+        PlotPanel(cell.data, with_spec_fields(cell.spec; style), cell.options, cell.primitives)
+    end
+    return PlotFigure(cells; layout=f.layout, size=f.size, widths=f.widths, heights=f.heights, style=f.style)
+end
+figure_styles(f::PlotFigure) = vcat(f.style === nothing ? Symbol[] : [f.style],
+    (c isa PlotFigure ? figure_styles(c) :
+     hasproperty(c.spec, :style) && c.spec.style !== nothing ? [c.spec.style] : Symbol[] for c in f.panels)...)
+function figure_style(f::PlotFigure)
+    names = unique(lowercase.(String.(figure_styles(f))))
+    length(names) <= 1 ||
+        throw(ArgumentError("panels request different ROOT styles ($(join(names, ", "))); gROOT->SetStyle is process-global"))
+    return f
+end
 
 figure_depth(f::PlotFigure) = 1 + maximum((c isa PlotFigure ? figure_depth(c) : 0) for c in f.panels)
 figure_leaves(f::PlotFigure) = reduce(vcat, (c isa PlotFigure ? figure_leaves(c) : PlotPanel[c] for c in f.panels);
@@ -64,7 +113,14 @@ function panel_scene(panel, nseries)
     else
         defaults = (xlabel=spec.xlabel,ylabel=spec.ylabel,title=spec.title,
                     logx=spec.logx,logy=spec.logy,size=spec.size,legend=:none,
-                    canvas=CanvasStyle(left_margin=0.14,right_margin=0.18,bottom_margin=0.13))
+                    xaxis=spec.xaxis,yaxis=spec.yaxis,
+                    style=spec.style,nd_label_fields(spec)...,
+                    # The native painter picks the right margin (0.18, or 0.2 for a titled palette,
+                    # widened until the palette labels, exponent and z title fit);
+                    # explicit Graph2DSpec/Graph3DSpec canvas fields override the layout defaults.
+                    # A selected ROOT style keeps its own left/bottom margins.
+                    canvas=spec.style === nothing ?
+                           merge_canvas(CanvasStyle(left_margin=0.14,bottom_margin=0.13),spec.canvas) : spec.canvas)
         overrides = (; (key=>options[key] for key in common if haskey(options,key))...)
         scene = GraphSpec(; merge(defaults, overrides)...)
     end
@@ -132,10 +188,14 @@ function write_basic_panel(path,panel)
     nd && length(layers)!=1 && throw(ArgumentError("ND layers cannot be mixed in this layout API"))
     spec,opts=panel.spec,panel.options
     allowed=(:draw,:style,:styles,:label,:labels,:xaxis,:yaxis,:zaxis,:canvas,:lines,:texts,
-             :legend_spec,:legend,:xlimits,:ylimits,:zlimits,:contour_levels)
-    all(k -> k in allowed,keys(opts)) || throw(ArgumentError("unknown panel keyword"))
+             :legend_spec,:legend,:xlimits,:ylimits,:zlimits,:contour_levels,
+             :stats,:fitstats,:stats_position,:stats_name,:stats_headroom,:attached_fit,:fit_label)
+    unknown=filter(k -> !(k in allowed),collect(keys(opts)))
+    isempty(unknown) || throw(ArgumentError("unknown panel keyword: $(join(unknown, ", "))"))
     scene=panel_scene(panel,length(layers))
-    zaxis=get(opts,:zaxis,AxisStyle()); validate_axis(zaxis)
+    zaxis=get(opts,:zaxis,hasproperty(spec,:zaxis) ? spec.zaxis : AxisStyle())
+    zaxis isa AxisStyle || throw(ArgumentError("zaxis must be an AxisStyle"))
+    validate_axis(zaxis; name=:z)
     levels=Float64.(get(opts,:contour_levels,Float64[]))
     length(levels)<=255 && all(isfinite,levels) && all(diff(levels).>0) ||
         throw(ArgumentError("contour levels must be finite and strictly increasing (at most 255)"))
@@ -158,6 +218,19 @@ function write_basic_panel(path,panel)
         xy=panel_limits(layers,scene)
         (xy[1],xy[2],(0.,1.))
     end
+    # Bin labels need the histogram bins of the drawn frame: the first Hist1D layer of a
+    # 1-D panel (its frame takes that binning) or the 2-D/3-D histogram itself.
+    let h=first(layers)
+        bins = if nd
+            (length(h.xedges)-1, length(h.yedges)-1, dimensions==3 ? length(h.zedges)-1 : nothing)
+        else
+            k=findfirst(x -> x isa Hist1D, layers)
+            (k === nothing ? nothing : length(layers[k].sumw), nothing, nothing)
+        end
+        what = nd ? "this panel" : "a panel without a Hist1D layer"
+        check_axis_bins(scene.xaxis,bins[1],:x,what); check_axis_bins(scene.yaxis,bins[2],:y,what)
+        check_axis_bins(zaxis,bins[3],:z,what)
+    end
     for (axis, limits, logscale) in ((:x,ranges[1],scene.logx),(:y,ranges[2],scene.logy),(:z,ranges[3],logz))
         # For 2D histograms z is the color value, not a spatial bin axis.
         (axis==:z && dimensions==2 && !haskey(opts,:zlimits)) && continue
@@ -167,14 +240,37 @@ function write_basic_panel(path,panel)
     labels=get(opts,:labels,[get(opts,:label,h isa Union{GraphSeries,ModelCurve,ErrorGraph} ? h.label : "") for h in layers])
     styles=get(opts,:styles,[get(opts,:style,h isa Union{GraphSeries,ModelCurve,ErrorGraph} ? h.style : GraphStyle()) for h in layers])
     length(labels)==length(styles)==length(layers) || throw(ArgumentError("layer labels/styles must match"))
+    # Statistics box of the first histogram layer; fit attached to the first Hist1D, else GraphSeries.
+    first_hist=findfirst(h -> h isa Union{Hist1D,Hist2D,Hist3D},layers)
+    attached_fit=get(opts,:attached_fit,nothing)
+    fit_target=nothing
+    if attached_fit !== nothing
+        validate_attached_fit(attached_fit)
+        fit_target=something(findfirst(h -> h isa Hist1D,layers),findfirst(h -> h isa GraphSeries,layers),Some(nothing))
+        fit_target === nothing && throw(ArgumentError("attached_fit needs a Hist1D or GraphSeries layer"))
+    end
+    owner=first_hist !== nothing ? first_hist : fit_target
+    request=stats_request(; stats=get(opts,:stats,false),fitstats=get(opts,:fitstats,false),
+                          stats_position=get(opts,:stats_position,:auto),fit=attached_fit,
+                          stats_headroom=get(opts,:stats_headroom,false),ylimits=scene.ylimits,
+                          one_dimensional=!nd,
+                          allow_stats=first_hist !== nothing,what="panels without a histogram layer",
+                          name=stats_header(get(opts,:stats_name,nothing),owner === nothing ? "" : String(labels[owner])))
+    fit_label=String(get(opts,:fit_label,""))
+    clean_field(fit_label)
     open(path,"w") do io
         println(io,"ROOTPlotsGraph\t1")
         println(io,join(("PLOT",spec.size...,dimensions,Int(scene.logx),Int(scene.logy),Int(logz),
                          theta,phi,palette_name,counts,length(layers),scene.legend),'\t'))
+        write_stats_row(io,request)
+        if attached_fit !== nothing
+            println(io,join(("FITTARGET",fit_target,scene_text(fit_label)),'\t'))
+            write_attached_fit(io,attached_fit)
+        end
         println(io,join(("LABELS",(scene_text(s) for s in (scene.title,scene.xlabel,scene.ylabel,nd ? spec.zlabel : ""))...),'\t'))
         println(io,join(("LIMITS",1,ranges[1]...,1,ranges[2]...,Int(haskey(opts,:zlimits)),ranges[3]...),'\t'))
         write_scene(io,scene)
-        println(io,join(("ZSTYLE",(scene_value(getfield(zaxis,k)) for k in fieldnames(AxisStyle))...),'\t'))
+        write_axis(io,"ZSTYLE","z",zaxis)
         println(io,join(("LEVELS",length(levels),levels...),'\t'))
         for (i,h) in enumerate(layers)
             label=scene_text(String(labels[i]))
@@ -219,6 +315,7 @@ function write_basic_panel(path,panel)
                 println(io,"HIST\t",length(h.sumw))
                 for (j,e) in enumerate(h.edges) println(io,"EDGE\t",j,'\t',e) end
                 for j in eachindex(h.sumw) println(io,"BIN\t",j,'\t',h.sumw[j],'\t',h.sumw2[j]) end
+                write_hist_stats(io,h)
             else
                 values=h isa Union{Hist2D,Hist3D} ? h.sumw : h.values
                 errors=h isa Union{Hist2D,Hist3D}
@@ -233,6 +330,7 @@ function write_basic_panel(path,panel)
                     v=errors ? h.sumw2[index] : 0.
                     println(io,join(("CELL",Tuple(index)...,values[index],v),'\t'))
                 end
+                errors && write_hist_stats(io,h)
             end
         end
         println(io,"END\t",length(layers))
@@ -282,6 +380,7 @@ end
 
 function render_root(figure::PlotFigure,outstem::AbstractString;format=:png,root_config=nothing)
     paths=plot_output_paths(outstem,format)
+    figure=figure_style(styled_figure(figure))
     leaves=figure_leaves(figure)
     mktempdir() do dir
         payloads=Vector{String}[]
@@ -308,6 +407,15 @@ function render_root(figure::PlotFigure,outstem::AbstractString;format=:png,root
             end
         end
         length(unique(palettes))<=1 || throw(ArgumentError("all pads must use the same ROOT palette"))
+        # TGaxis::SetExponentOffset is static: one offset per axis direction for the whole canvas.
+        for direction in ("x","y")
+            offsets=Set{Tuple{String,String}}()
+            for rows in payloads, row in rows
+                v=split(row,'\t')
+                v[1]=="AXIS" && v[2]==direction && v[end-1]!="-" && push!(offsets,(v[end-1],v[end]))
+            end
+            length(offsets)<=1 || throw(ArgumentError("pads have conflicting $direction exponent_offset values (TGaxis::SetExponentOffset is global)"))
+        end
         for position in 1:2
             values=unique(filter(!isnothing,[c[position] for c in global_controls]))
             length(values)<=1 || throw(ArgumentError("pads have conflicting global ROOT error/PS settings"))
@@ -331,6 +439,14 @@ function render_root(figure::PlotFigure,outstem::AbstractString;format=:png,root
 end
 render_root(panel::PlotPanel,stem::AbstractString;kwargs...) =
     render_root(PlotFigure([panel];size=panel.spec.size),stem;kwargs...)
+"""
+    render_root(h::Hist2D, spec::Union{Graph2DSpec,Graph3DSpec}, stem; format=:png, kwargs...)
+    render_root(h::Hist3D, spec::Graph3DSpec, stem; format=:png, kwargs...)
+
+Draw a native TH2D/TH3D (one `PlotPanel`); `kwargs` are panel keywords, e.g.
+`draw="COLZ"`, `label`, `stats=true` (ROOT's Entries, Mean x/y, Std Dev x/y),
+`stats_position`, `stats_name`.
+"""
 render_root(h::Hist2D,spec::Union{Graph2DSpec,Graph3DSpec},stem::AbstractString;
             format=:png,root_config=nothing,kwargs...) =
     render_root(PlotPanel(h,spec;kwargs...),stem;format,root_config)

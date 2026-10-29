@@ -134,7 +134,31 @@ function validate_triangulation(cloud)
     return cloud
 end
 
-"""A two-coordinate scalar-field view, either colored cells or ROOT contour lines."""
+"""
+    Graph2DSpec(; title="", xlabel="x", ylabel="y", zlabel="z", draw=:heatmap,
+                palette=:viridis, contours=10, logx=false, logy=false, logz=false,
+                size=(800, 650), xaxis=AxisStyle(), yaxis=AxisStyle(), zaxis=AxisStyle(),
+                canvas=CanvasStyle())
+
+A two-coordinate scalar-field view (colored cells, contours, or a ROOT option
+string such as `"COLZ"`), used for `Grid2D`, `Hist2D`, `Profile2D`,
+`PolygonHist2D`, and TF2 `ModelSurface`.
+
+- `title`, `xlabel`, `ylabel`, `zlabel`: plot title and axis titles (`zlabel` titles
+  the palette axis).
+- `draw`: `:heatmap` (`COLZ`), `:contour` (`CONT3`), or a ROOT draw option string.
+- `palette`: `:viridis` or `:bird` (`gStyle->SetPalette`); `contours`: number of
+  contour levels (`TH1::SetContour`).
+- `logx`, `logy`, `logz`: `TPad::SetLogx/SetLogy/SetLogz` (`logz` = logarithmic color scale).
+- `size`: canvas size in pixels.
+- `xaxis`, `yaxis`, `zaxis`: [`AxisStyle`](@ref) for the histogram axes; `zaxis` also
+  styles the palette axis (ROOT's palette imports the z-axis attributes).
+- `canvas`: [`CanvasStyle`](@ref) (margins override the package's layout defaults,
+  grids, ROOT title box).
+- `style`, `cms_label`, `atlas_label`: ROOT style and experiment label, as in
+  [`GraphSpec`](@ref). With a style, flat 2-D views keep the style's margins
+  (a palette still gets the package's right margin, sized for the style's z label and title).
+"""
 Base.@kwdef struct Graph2DSpec
     title::String = ""
     xlabel::String = "x"
@@ -147,12 +171,38 @@ Base.@kwdef struct Graph2DSpec
     logy::Bool = false
     logz::Bool = false
     size::Tuple{Int,Int} = (800,650)
+    xaxis::AxisStyle = AxisStyle()
+    yaxis::AxisStyle = AxisStyle()
+    zaxis::AxisStyle = AxisStyle()
+    canvas::CanvasStyle = CanvasStyle()
+    style::Union{Nothing,Symbol} = nothing
+    cms_label::Union{Nothing,Bool,NamedTuple} = nothing
+    atlas_label::Union{Nothing,Bool,NamedTuple} = nothing
 end
 
-"""A native 3-D or scattered scalar-field view.
-Graph3D/Graph3DErrors surfaces, triangles, heatmaps and contours require
+# The original eleven-field positional form remains valid.
+Graph2DSpec(title,xlabel,ylabel,zlabel,draw,palette,contours,logx,logy,logz,size) =
+    Graph2DSpec(;title,xlabel,ylabel,zlabel,draw,palette,contours,logx,logy,logz,size)
+
+"""
+    Graph3DSpec(; title="", xlabel="x", ylabel="y", zlabel="z", draw=:surface,
+                palette=:viridis, theta=30, phi=30, logx=false, logy=false, logz=false,
+                size=(900, 700), interpolate=false, resolution=(40, 40), contours=10,
+                xaxis=AxisStyle(), yaxis=AxisStyle(), zaxis=AxisStyle(), canvas=CanvasStyle())
+
+A native 3-D or scattered scalar-field view (surfaces, TH3 volumes, XYZ graphs,
+TF2/TF3). Graph3D/Graph3DErrors surfaces, triangles, heatmaps and contours require
 `interpolate=true`; `resolution=(nx,ny)` controls ROOT's interpolation grid.
 Points/lines do not interpolate and preserve duplicate xy samples.
+
+- `theta`, `phi`: view angles (`TPad::SetTheta/SetPhi`).
+- `logx`, `logy`, `logz`: `TPad::SetLogx/SetLogy/SetLogz` (not for XYZ graphs and TF3,
+  whose batch painters do not support log coordinates).
+- `xaxis`, `yaxis`, `zaxis`: [`AxisStyle`](@ref) for the three axes.
+- `canvas`: [`CanvasStyle`](@ref).
+- `style`, `cms_label`, `atlas_label`: as in [`Graph2DSpec`](@ref) (3-D views keep
+  the package's margins).
+Other fields as in [`Graph2DSpec`](@ref).
 """
 Base.@kwdef struct Graph3DSpec
     title::String = ""
@@ -170,13 +220,26 @@ Base.@kwdef struct Graph3DSpec
     interpolate::Bool = false
     resolution::Tuple{Int,Int} = (40,40)
     contours::Int = 10
+    xaxis::AxisStyle = AxisStyle()
+    yaxis::AxisStyle = AxisStyle()
+    zaxis::AxisStyle = AxisStyle()
+    canvas::CanvasStyle = CanvasStyle()
+    style::Union{Nothing,Symbol} = nothing
+    cms_label::Union{Nothing,Bool,NamedTuple} = nothing
+    atlas_label::Union{Nothing,Bool,NamedTuple} = nothing
 end
 
 Graph3DSpec(title,xlabel,ylabel,zlabel,draw,palette,theta,phi,logx,logy,logz,size) =
     Graph3DSpec(;title,xlabel,ylabel,zlabel,draw,palette,theta,phi,logx,logy,logz,size)
 
+has_scene(spec::Union{Graph2DSpec,Graph3DSpec}) = spec.xaxis != AxisStyle() || spec.yaxis != AxisStyle() ||
+    spec.zaxis != AxisStyle() || spec.canvas != CanvasStyle() || has_style_or_label(spec)
+
 function validate_nd_spec(spec)
     all(n -> 1 <= n <= 10000, spec.size) || throw(ArgumentError("canvas size must be 1:10000"))
+    validate_axis(spec.xaxis; name=:x); validate_axis(spec.yaxis; name=:y); validate_axis(spec.zaxis; name=:z)
+    validate_canvas(spec.canvas)
+    validate_style_and_label(spec)
     spec.palette in (:bird, :viridis) || throw(ArgumentError("palette must be :bird or :viridis"))
     for label in (spec.title, spec.xlabel, spec.ylabel, spec.zlabel)
         clean_field(label)
@@ -208,6 +271,7 @@ end
 function write_nd_labels(io, spec)
     println(io, join(("LABELS", (clean_field(root_latex(label)) for label in
                  (spec.title,spec.xlabel,spec.ylabel,spec.zlabel))...), '\t'))
+    write_scene(io, spec) # axis/canvas styles; nothing is written for default styles
 end
 
 function write_grid_spec(path, grid::Grid2D, spec)
@@ -295,6 +359,7 @@ function validate_xyz_plot(cloud,spec::Graph3DSpec)
     # ROOT's TGraph2D point/error painter does not implement log coordinates reliably.
     !(spec.logx || spec.logy || spec.logz) ||
         throw(ArgumentError("XYZ drawing does not support logarithmic axes"))
+    check_spec_bins(spec, "an XYZ graph")
     return option
 end
 
@@ -377,6 +442,7 @@ function render_root(grid::Grid3D, spec::Graph3DSpec, outstem::AbstractString;
         logscale && first(edges) <= 0 &&
             throw(ArgumentError("log $axis needs positive grid edges"))
     end
+    check_spec_bins(spec, "Grid3D", size(grid.values)...)
     return render_nd(grid,spec,outstem,paths;root_config)
 end
 
@@ -387,6 +453,7 @@ function render_root(grid::Grid2D, spec::Graph2DSpec, outstem::AbstractString;
     validate_grid(grid); validate_nd_spec(spec)
     spec.logx && first(grid.xedges) <= 0 && throw(ArgumentError("log x needs positive grid edges"))
     spec.logy && first(grid.yedges) <= 0 && throw(ArgumentError("log y needs positive grid edges"))
+    check_spec_bins(spec, "Grid2D", size(grid.values)...)
     return render_nd(grid,spec,outstem,paths;root_config)
 end
 
@@ -415,6 +482,7 @@ function render_root(grids::AbstractVector{Grid2D}, spec::Graph2DSpec,
             throw(ArgumentError("each 2-D overlay layer after the first needs SAME"))
         push!(options,value)
     end
+    check_spec_bins(spec, "a 2-D overlay", size(first(grids).values)...)
     config=find_root_config(root_config)
     config === nothing && throw(ArgumentError("local native ROOT not found"))
     exe=graphfit_executable(config)
@@ -441,6 +509,7 @@ function render_root(grid::Grid2D, spec::Graph3DSpec, outstem::AbstractString;
         all(n -> n >= 2, size(grid.values)) ||
             throw(ArgumentError("3-D surface needs at least two cells along both x and y"))
     end
+    check_spec_bins(spec, "Grid2D", size(grid.values)...)
     return render_nd(grid,spec,outstem,paths;root_config)
 end
 

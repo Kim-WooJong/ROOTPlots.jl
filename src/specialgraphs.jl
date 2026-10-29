@@ -87,7 +87,12 @@ function write_special_plot(path,g::SpecialGraph,spec::GraphSpec;points=false)
     if polar || pie
         (spec.logx || spec.logy || spec.xlimits!==nothing || spec.ylimits!==nothing) &&
             throw(ArgumentError("polar/pie plots own non-Cartesian axes; Cartesian limits/logs are not applicable"))
+        c=spec.canvas
+        spec.xaxis == AxisStyle() && spec.yaxis == AxisStyle() && c.grid_x === nothing && c.grid_y === nothing &&
+            c.opt_title !== true ||
+            throw(ArgumentError("polar/pie plots have no Cartesian frame; AxisStyle, grids and the ROOT title box are not applicable"))
     end
+    check_spec_bins(spec,"a special graph")
     kind=polar ? "polar" : pie ? "pie" : g isa QQGraph ? "qq" : g isa SplineCurve ? "spline" : "efficiency"
     n=polar ? length(g.angle) : pie ? length(g.values) : g isa EfficiencyGraph ? length(g.passed) : length(g.x)
     xrange=polar || pie ? (0.,1.) : g isa EfficiencyGraph ? (first(g.edges),last(g.edges)) : (minimum(g.x),maximum(g.x))

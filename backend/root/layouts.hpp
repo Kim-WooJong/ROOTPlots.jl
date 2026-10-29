@@ -2,6 +2,7 @@
 struct LayoutDrawing {
   std::vector<std::unique_ptr<TObject>> objects;
   SceneObjects decorations;
+  FrozenStats stats; // destroyed first: boxes are pad primitives of this panel
 };
 std::vector<double> layout_edges(const std::vector<std::vector<std::string>>& rows,
                                  size_t &at,const std::string &tag,int n) {
@@ -19,7 +20,14 @@ LayoutDrawing paint_layout_basic(const std::vector<std::vector<std::string>>& ro
   size_t at=0;
   check(!rows.empty() && rows[0].size()==13 && rows[0][0]=="PLOT","invalid PLOT");
   const auto &header=rows[at++];
+  auto box=read_stats_box(rows,at);
+  auto fit=read_fit_target(rows,at);
   int dimension=integer(header[3]),nlayers=integer(header[11]);
+  check(!fit.function || (dimension==1 && fit.target<=nlayers),"invalid panel fit target");
+  check(box.optfit==0 || fit.function,"fit box needs an attached fit");
+  TF1 *fit_function=fit.function.get();
+  std::vector<TObject*> stats_owners;
+  bool stats_owner_set=false,palette_box=false;
   check(dimension>=1 && dimension<=3 && nlayers>=1 && nlayers<=64 && (dimension==1 || nlayers==1),"invalid panel layers/dimension");
   bool logx=bit(header[4]),logy=bit(header[5]),logz=bit(header[6]);
   double theta=real(header[7]),phi=real(header[8]);
@@ -38,20 +46,24 @@ LayoutDrawing paint_layout_basic(const std::vector<std::vector<std::string>>& ro
         (!logx || xmin>0) && (!logy || ymin>0) && (!logz || !explicit_z || zmin>0),"invalid panel limits");
   auto scene=read_scene(rows,at);
   validate_scene(scene,logx,logy,nlayers);
-  check(at<rows.size() && rows[at].size()==11 && rows[at][0]=="ZSTYLE","invalid panel z axis style");
-  auto zstyle=rows[at++];
-  std::vector<std::string> zaxis(zstyle.begin()+1,zstyle.end());
+  check(at<rows.size() && rows[at].size()>=2 && rows[at][0]=="ZSTYLE" && rows[at][1]=="z","invalid panel z axis style");
+  AxisSpec zaxis; axis_scalars(zaxis,rows[at++],2);
+  while(at<rows.size() && axis_extra(zaxis,rows[at],"z")) ++at;
   check(at<rows.size() && rows[at].size()>=2 && rows[at][0]=="LEVELS","missing panel contour levels");
   auto levels_row=rows[at++]; int nlevels=integer(levels_row[1]);
   check(nlevels>=0 && nlevels<=255 && levels_row.size()==static_cast<size_t>(nlevels+2),"invalid contour levels");
   std::vector<double> levels;
   for(int i=0;i<nlevels;++i) { double v=real(levels_row[2+i]); check(levels.empty() || v>levels.back(),"unordered contour levels"); levels.push_back(v); }
   pad.cd(); apply_canvas(pad,scene);
+  const bool free_right_margin=scene.canvas[1]=="-";
+  if(dimension>1 && free_right_margin) pad.SetRightMargin(0.18);
+  bool titled_palette=false;
   pad.SetLogx(logx); pad.SetLogy(logy); pad.SetLogz(logz); pad.SetTheta(theta); pad.SetPhi(phi);
+  if(box.active) stats_begin(box);
   LayoutDrawing result;
   std::vector<TObject*> objects;
   std::vector<std::string> object_labels,legend_options;
-  TH1 *frame=nullptr;
+  TH1 *frame=nullptr,*first_hist1=nullptr;
   if(dimension==1) frame=pad.DrawFrame(xmin,ymin,xmax,ymax);
   std::vector<ErrorLayer::Extra> extra_entries;
   for(int layer=0;layer<nlayers;++layer) {
@@ -87,6 +99,10 @@ LayoutDrawing paint_layout_basic(const std::vector<std::vector<std::string>>& ro
       auto series=read_series(rows,at,1);
       validate_series_log(series,logx,logy);
       auto graph=make_graph(series);
+      if(fit.function && fit.target==layer+1) {
+        graph->GetListOfFunctions()->Add(fit.function.release()); // owned by the graph
+        stats_owners.push_back(graph.get());
+      }
       graph->Draw(draw_option(series).c_str());
       objects.push_back(graph.get()); object_labels.push_back(series.label); legend_options.push_back(legend_option(series));
       result.objects.push_back(std::move(graph));
@@ -133,15 +149,31 @@ LayoutDrawing paint_layout_basic(const std::vector<std::vector<std::string>>& ro
       int global=hist->GetBin(ix,ndim>1 ? iy : 0,ndim>2 ? iz : 0);
       hist->SetBinContent(global,value); if(errors) hist->SetBinError(global,std::sqrt(variance));
     }
+    read_hist_stats(rows,at,*hist);
+    // The first histogram layer owns the statistics box; the fit may also attach to it.
+    bool owner=box.active && !stats_owner_set;
+    if(owner) {
+      stats_owner_set=true; hist->SetStats(true); hist->SetName(box.name.c_str());
+      stats_owners.insert(stats_owners.begin(),hist.get());
+      palette_box=option_has_palette(item[3],ndim);
+    }
+    if(fit.function && fit.target==layer+1) {
+      check(ndim==1,"fits attach to 1-D histograms only");
+      hist->GetListOfFunctions()->Add(fit.function.release()); // owned by the histogram
+      if(!owner) { hist->SetStats(box.active); if(box.active) stats_owners.push_back(hist.get()); }
+    }
     int c=TColor::GetColor(style[1].c_str());
     hist->SetLineColor(c); hist->SetLineWidth(width); hist->SetLineStyle(line_style);
     hist->SetMarkerColor(c); hist->SetMarkerStyle(marker); hist->SetMarkerSize(marker_size);
     hist->SetFillColorAlpha(TColor::GetColor(style[6].c_str()),alpha); hist->SetFillStyle(fill_style);
     hist->SetContour(nlevels ? nlevels : contours,nlevels ? levels.data() : nullptr);
     std::string option=item[3];
-    if(ndim==1) option+=" SAME";
+    if(flat_palette(option,ndim)) titled_palette=true;
+    if(ndim==1) option+=owner ? " SAMES" : " SAME";
     else {
-      hist->GetXaxis()->SetRangeUser(xmin,xmax); hist->GetYaxis()->SetRangeUser(ymin,ymax);
+      // A full-range SetRangeUser would make ROOT recompute statistics from bin centres.
+      bool full=xmin<=xe.front() && xmax>=xe.back() && ymin<=ye.front() && ymax>=ye.back();
+      if(!(owner && full)) { hist->GetXaxis()->SetRangeUser(xmin,xmax); hist->GetYaxis()->SetRangeUser(ymin,ymax); }
       if(explicit_z) {
         if(ndim==2) { hist->SetMinimum(zmin); hist->SetMaximum(zmax); }
         else hist->GetZaxis()->SetRangeUser(zmin,zmax);
@@ -150,6 +182,7 @@ LayoutDrawing paint_layout_basic(const std::vector<std::vector<std::string>>& ro
       frame=hist.get();
     }
     hist->Draw(option.c_str());
+    if(ndim==1 && !first_hist1) first_hist1=hist.get();
     objects.push_back(hist.get()); object_labels.push_back(item[2]);
     legend_options.push_back(root_option_uses_fill(item[3]) ? "f" : "lep");
     result.objects.push_back(std::move(hist));
@@ -157,11 +190,23 @@ LayoutDrawing paint_layout_basic(const std::vector<std::vector<std::string>>& ro
   check(at+1==rows.size() && rows[at].size()==2 && rows[at][0]=="END" && integer(rows[at][1])==nlayers,"invalid panel END");
   check(frame!=nullptr,"missing panel frame");
   frame->GetXaxis()->SetTitle(labels.x.c_str()); frame->GetYaxis()->SetTitle(labels.y.c_str());
-  frame->GetZaxis()->SetTitle(labels.z.c_str()); apply_axes(frame,scene); apply_axis(frame->GetZaxis(),zaxis);
+  frame->GetZaxis()->SetTitle(labels.z.c_str());
+  // Bin labels name histogram bins: a 1-D frame takes the first histogram layer's binning.
+  if(dimension==1 && has_bin_labels(scene,0)) {
+    check(first_hist1!=nullptr,"bin labels need a histogram layer");
+    frame_bins(frame,first_hist1,xmin,xmax);
+  }
+  apply_axes(frame,scene); apply_axis_spec(frame->GetZaxis(),zaxis,"z");
+  palette_title_room(pad,frame,titled_palette,scene.canvas,
+                     scene.axes[2].v[AX_TITLE_OFFSET]=="-" && zaxis.v[AX_TITLE_OFFSET]=="-");
   // Per-error-set legend proxies follow all layers so explicit :series indices are unchanged.
   for(const auto &e:extra_entries) { objects.push_back(e.object); object_labels.push_back(e.label); legend_options.push_back(e.option); }
-  result.decorations=draw_scene(scene,corner,objects,object_labels,legend_options);
-  if(!labels.title.empty()) {
+  check(!fit.function,"panel fit target is not a histogram or graph layer");
+  if(fit_function && !fit.label.empty()) { objects.push_back(fit_function); object_labels.push_back(fit.label); legend_options.push_back("l"); }
+  result.stats=freeze_stats(pad,box,stats_owners,palette_box);
+  stats_headroom(pad,box,result.stats.rect,frame,objects);
+  result.decorations=draw_scene(scene,corner,objects,object_labels,legend_options,result.stats.rect);
+  if(!root_title(pad,frame,labels.title,scene.canvas) && !labels.title.empty()) {
     auto title=std::make_unique<TLatex>(0.13,0.94,labels.title.c_str());
     title->SetNDC(); title->SetTextSize(0.035); title->Draw(); result.objects.push_back(std::move(title));
   }

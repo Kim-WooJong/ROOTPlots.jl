@@ -8,6 +8,7 @@ struct AdvancedHeader {
   double theta,phi,xmin,xmax,ymin,ymax;
   Labels labels;
   Scene scene;
+  StatsBox box;
 };
 
 bool advanced_command(const std::string &command) {
@@ -25,6 +26,8 @@ AdvancedHeader advanced_header(const std::vector<std::vector<std::string>> &rows
   h.explicit_x=bit(f[12]); h.xmin=real(f[13]); h.xmax=real(f[14]);
   h.explicit_y=bit(f[15]); h.ymin=real(f[16]); h.ymax=real(f[17]);
   h.stats=bit(f[18]); h.count=integer(f[19]); h.error=f[20]; h.corner=f[21];
+  h.box=read_stats_box(rows,at);
+  check(h.stats==h.box.active && h.box.optfit==0,"inconsistent advanced statistics box");
   check(h.width>=1 && h.width<=10000 && h.height>=1 && h.height<=10000,"invalid advanced canvas size");
   check(h.dim>=1 && h.dim<=3,"invalid advanced dimension");
   check_root_option(h.option);
@@ -48,6 +51,7 @@ struct AdvancedDrawing {
   SceneObjects decorations;
   TH1 *profile=nullptr;
   int dimension=0;
+  FrozenStats stats; // destroyed first: boxes are pad primitives of the drawing
 };
 
 std::vector<double> advanced_edges(const std::vector<std::vector<std::string>> &rows,
@@ -115,6 +119,11 @@ void advanced_profile(const std::vector<std::vector<std::string>> &rows,size_t &
     p3=p.get(); p3->SetErrorOption(error.c_str()); owner=std::move(p);
   }
   owner->SetDirectory(nullptr); owner->Sumw2(); owner->SetStats(h.stats);
+  // ROOT's default profile attributes pair a dark-blue line (602) with a black
+  // marker (1). Batch PNG output then paints E1 error bars alternately in the
+  // two colours, bin by bin (plain ROOT macros show the same). One colour for
+  // lines and markers, as for Hist1D.
+  owner->SetLineColor(kBlack); owner->SetMarkerColor(kBlack);
   for(int i=1;i<=h.count;++i) {
     check(at<rows.size() && rows[at].size()==static_cast<size_t>(h.dim+4) && rows[at][0]=="SAMPLE" &&
           integer(rows[at][1])==i,"invalid profile SAMPLE");
@@ -240,7 +249,8 @@ AdvancedDrawing paint_advanced(const std::vector<std::vector<std::string>> &rows
   AdvancedHeader h; std::vector<std::string> labels;
   auto drawing=advanced_parse(rows,h,labels);
   pad.cd(); apply_canvas(pad,h.scene);
-  gStyle->SetOptStat(h.stats ? (drawing.profile ? 1110 : 1100) : 0);
+  check(!h.stats || !drawing.stack,"ROOT draws no statistics box for THStack");
+  if(h.stats) { stats_begin(h.box); drawing.histograms.front()->SetName(h.box.name.c_str()); }
   pad.SetLogx(h.logx); pad.SetLogy(h.logy); pad.SetLogz(h.logz);
   pad.SetTheta(h.theta); pad.SetPhi(h.phi);
   if(h.dim>1) palette(h.palette_name);
@@ -253,19 +263,25 @@ AdvancedDrawing paint_advanced(const std::vector<std::vector<std::string>> &rows
     frame=drawing.histograms.front().get();
     frame->SetContour(h.contours);
     if(h.explicit_y && h.dim==1) { frame->SetMinimum(h.ymin); frame->SetMaximum(h.ymax); }
-    if(h.dim>=2) pad.SetRightMargin(0.18);
+    if(h.dim>=2 && h.scene.canvas[CV_RIGHT]=="-") pad.SetRightMargin(0.18);
     frame->Draw(h.option.c_str());
   }
   frame->GetXaxis()->SetTitle(h.labels.x.c_str()); frame->GetYaxis()->SetTitle(h.labels.y.c_str());
   if(h.dim>=2) frame->GetZaxis()->SetTitle(h.labels.z.c_str());
   apply_axes(frame,h.scene);
+  palette_title_room(pad,frame,flat_palette(h.option,h.dim),h.scene.canvas,h.scene.axes[2].v[AX_TITLE_OFFSET]=="-");
   if(h.explicit_x) frame->GetXaxis()->SetRangeUser(h.xmin,h.xmax);
   std::vector<TObject*> objects;
   for(const auto &hist:drawing.histograms) objects.push_back(hist.get());
   if(labels.empty()) labels.resize(objects.size());
+  if(h.stats) drawing.stats=freeze_stats(pad,h.box,{frame},option_has_palette(h.option,h.dim));
+  if(h.stats) stats_headroom(pad,h.box,drawing.stats.rect,frame,objects);
   drawing.decorations=draw_scene(h.scene,h.corner,objects,labels,
-                                std::vector<std::string>(objects.size(),drawing.stack ? "f" : "lep"));
-  if(!h.labels.title.empty()) {
+                                std::vector<std::string>(objects.size(),drawing.stack ? "f" : "lep"),
+                                drawing.stats.rect);
+  // THStack copies its own title to its frame histogram whenever it is painted.
+  if(drawing.stack && root_title_on(h.scene.canvas)) drawing.stack->SetTitle(h.labels.title.c_str());
+  if(!root_title(pad,frame,h.labels.title,h.scene.canvas) && !h.labels.title.empty()) {
     auto heading=std::make_unique<TLatex>(0.13,0.94,h.labels.title.c_str());
     heading->SetNDC(); heading->SetTextSize(0.035); heading->Draw();
     drawing.decorations.texts.push_back(std::move(heading));

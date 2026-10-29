@@ -5,6 +5,13 @@
 This document describes the supported scope and the scientific contracts of the
 computations. ROOTPlots is not a complete ROOT API binding.
 
+ROOTPlots.jl is a Julia API for using ROOT's own drawing and fitting features,
+not a reimplementation. Every option maps onto a ROOT method/option/style
+setting, named so a ROOT user recognises it (snake_case of the ROOT method;
+docstring cites it). An unset option keeps ROOT's default behaviour. Drawing,
+statistics, fitting and formatting are done by ROOT; Julia only validates input
+and passes data/options. See [design](design.md).
+
 ## Supported plots
 
 | Task | Julia API | Native ROOT object / behavior |
@@ -28,6 +35,7 @@ computations. ROOTPlots is not a complete ROOT API binding.
 | Arrows, boxes, ellipses, polygons, secondary axes | `PlotArrow`, `PlotBox`, `PlotEllipse`, `PlotPolygon`, `SecondaryAxis` | TArrow/TBox/TEllipse/TPolyLine/TGaxis |
 | Mixed and nested multi-panel figures, vector PDF | `PlotPanel`, `PlotFigure` | One TCanvas with (nested) TPads (not stitched PNGs) |
 | Parallel work | `rootmap`; `histogram(...; threads=...)` | Julia tasks/CPU threads + isolated ROOT processes |
+| Statistics and fit boxes | `stats`, `fitstats`, `attached_fit`, `stats_position` keywords | TPaveStats from `SetOptStat`/`SetOptFit`, TF1 with fit results |
 
 Out of scope or not implemented: ROOT file I/O, RDataFrame, GUI/OpenGL,
 RooFit/RooStats, arbitrary C++ or TF1/TF2/TF3 expression strings (analytic
@@ -447,25 +455,34 @@ render_root([observed], spec, "output/profile"; format=:both)
 
 - `AxisStyle`: per-axis `title_font`, `title_size`, `title_offset`, `label_font`,
   `label_size`, `label_offset`, `tick_length`, `divisions`, `max_digits`,
-  `center_title`. Omitted fields keep ROOT defaults; precision-3 fonts (e.g. 43)
-  use pixel sizes.
+  `center_title`, plus the number/label options of
+  [Axes, titles and number format](#axes-titles-and-number-format). Omitted
+  fields keep ROOT defaults; precision-3 fonts (e.g. 43) use pixel sizes.
 - `CanvasStyle`: four margins, ticks on both sides, `frame_line_width`,
-  `end_error_size`, `line_scale_ps`. Margins are canvas fractions.
+  `end_error_size`, `line_scale_ps`, grids, and the opt-in ROOT title box.
+  Margins are canvas fractions.
 - `PlotLine` uses **data coordinates** by default; `ndc=true` uses 0–1 canvas
   coordinates. A line `label` is collected into the automatic legend.
 - `PlotText` uses **NDC coordinates** by default; `ndc=false` uses data
   coordinates. `font`, `size`, `color`, `align`, and `angle` are configurable.
   Math uses ROOT TLatex syntax (`#sigma`, `#pm`, `#mum`, `mm^{2}`), not a full
   LaTeX engine.
+- An automatic legend (`legend=:topright` etc.) uses a fixed text size of
+  0.035 of the pad (ROOT's default axis label size) and a box sized from its
+  entries, so its text matches the axis labels in single canvases and figure
+  panels alike.
 - `legend_spec` replaces the `legend=:topright`-style position. `background=nothing`
   is transparent; a color string is opaque. `entries=nothing` collects labels
   automatically and `entries=[]` shows none. `LegendEntry` sets order, target, and
   the `l/p/pe/ep/lp/lep/f` marker.
 - Annotations never extend the data range. Data-coordinate lines/text must be
   positive on log axes. Clipping of out-of-range annotations follows ROOT pads.
-- These options apply to **single-pad GraphSeries/Hist1D/TH1 overlays**. Comparison
-  panels use `PanelSpec/PlotStyle`. The two-pad fit/pull figure rejects unsupported
-  scene settings instead of silently ignoring them; 2D/3D plots use their own specs.
+- Lines, texts, and legends apply to **single-pad** plots. Axis and canvas
+  styles also apply to 2D/3D specs (`Graph2DSpec`/`Graph3DSpec` `xaxis`, `yaxis`,
+  `zaxis`, `canvas`), comparison panels (`PanelSpec` `xaxis`, `yaxis`,
+  `ratio_yaxis`, grids/ticks), and the two-pad fit/pull figure (axis styles, grids,
+  ticks, title box); settings a layout owns (e.g. its margins) are rejected
+  instead of silently ignored.
 
 A native `TH1D` can share a canvas with graphs or fit curves:
 
@@ -516,7 +533,8 @@ r = fit_residuals(h.hist, fit)
 for **densities**). `effective_entries(hist)` is `(Σw)²/Σw²`, not the event count or
 ROOT's `GetEntries()`. `binned_mean`, `binned_std`, and `binned_mean_error` use bin
 centers; the last is ROOT's approximation `std/√effective_entries`. Exact event
-moments cannot be recovered from a `Hist1D`. `histstats` bundles these values and
+moments cannot be recovered from bin contents alone (`histogram` records them in
+`hist.moments` for ROOT's statistics box). `histstats` bundles these values and
 reports underflow/overflow **separately without using them**. A non-positive
 total weight, or a negative variance from signed weights, raises an error.
 
@@ -570,8 +588,8 @@ unchanged.
 String options such as `"HBAR3"`, `"PIE"`, `"AXIS"`, `"HIST ]["`, `"E0 E1 X0"`,
 `"BAR2"`, `"LF2"`, `"TEXT45"` are forwarded; ROOT then draws the histogram as the
 first object. Explicit `GraphSpec` ranges are forwarded as axis ranges/limits;
-otherwise ROOT chooses the range. `stats=true` shows a bin-center mean/std box
-but **no Entries**, since the original fill count is unknown.
+otherwise ROOT chooses the range. `stats=true` shows ROOT's statistics box; see
+[Statistics and fit boxes](#statistics-and-fit-boxes).
 
 `SAME`/`SAMES` are rejected on a standalone canvas and used when drawing several
 histograms in order; every later layer must contain `SAME`. `FUNC` requires a valid
@@ -631,6 +649,118 @@ selection → histogram → fit → combined figure.
 Arbitrary `TF1` strings are not accepted because they execute code through Cling;
 choose from the model list above.
 
+## Statistics and fit boxes
+
+ROOT's statistics box (`TPaveStats`) is drawn by ROOT itself: every number is
+computed and formatted by `THistPainter`/`TGraphPainter`, exactly as on a ROOT
+canvas. All keywords are opt-in; plots without them are unchanged.
+
+```julia
+h = histogram(values, edges).hist
+render_root(h, spec, "output/default"; draw="E1", label="signal", stats=true)
+
+fit = fit_root(h, :gaus; initial=[200.0, 0.0, 1.0])
+render_root(h, spec, "output/fit"; draw=:e1, stats=true, fitstats=true,
+            attached_fit=fit, fit_label="Gaussian fit")
+
+render_root(h, spec, "output/fields"; draw=:hist,
+            stats=(:name, :entries, :mean_error, :std_error, :underflow, :overflow),
+            stats_position=:topleft)
+render_root(xy.hist, Graph2DSpec(), "output/xy"; stats=true)          # Hist2D/Hist3D
+render_root(profile, GraphSpec(), "output/profile"; stats=true)       # Profile1D/2D/3D
+render_root([graph], GraphSpec(), "output/graph"; attached_fit=gfit, fitstats=true)
+PlotPanel(h, spec; draw=:e1, stats=true, attached_fit=fit, fitstats=true)  # in PlotFigure
+```
+
+| Keyword | Values | ROOT equivalent |
+|---|---|---|
+| `stats` | `false` (default), `true` (= name, Entries, Mean, Std Dev), a tuple of fields, a ROOT letter string, or an integer | `gStyle->SetOptStat` |
+| `fitstats` | `false` (default), `true` (= χ²/ndf, Prob, parameters ± errors), a tuple of fields, `"pcev"` letters, or an integer | `gStyle->SetOptFit` |
+| `attached_fit` | a valid `FitResult` | `TF1` in the object's list of functions |
+| `fit_label` | legend label of the attached TF1 (`""` = no legend entry) | |
+| `stats_position` | `:auto`, `:topright`, `:topleft`, `:bottomright`, `:bottomleft`, or NDC `(x1, y1, x2, y2)` | `TPaveStats::SetX1NDC`… |
+| `stats_name` | box header; default: the label (`"Histogram"`/`"Profile"` when empty) | histogram name |
+| `stats_headroom` | `false` (default, ROOT's behaviour) or `true`: raise the automatic y maximum of a 1-D frame so the data stay below a top box | `h->SetMaximum(…)` |
+
+Statistics fields (`stats=(…)`) and their ROOT letters: `:name` (`n`),
+`:entries` (`e`), `:mean` (`m`), `:mean_error` (`M`), `:std` (`r`),
+`:std_error` (`R`), `:underflow` (`u`), `:overflow` (`o`), `:integral`
+(`i`), `:integral_width` (`I`), `:skewness` (`s`), `:skewness_error` (`S`),
+`:kurtosis` (`k`), `:kurtosis_error` (`K`). So `stats="nemrou"` equals
+`stats=(:name, :entries, :mean, :std, :underflow, :overflow)` and the integer
+`110111`. The integer `1` means ROOT's default `1111`, as in ROOT. Fit fields:
+`:values` (`v`), `:free_values` (only non-fixed parameters), `:errors` (`e`),
+`:chi2` (`c`), `:prob` (`p`); the integer `1` means ROOT's `111`.
+`ROOTPlots.stats_option` and `ROOTPlots.fit_option` return the normalized integers.
+
+**What each object shows.**
+
+| Object | Box |
+|---|---|
+| `Hist1D` (any `draw`, including presets; `:steps` is drawn as `HIST` when a box or fit is requested) | Entries, Mean, Std Dev, …; fit lines with `attached_fit` |
+| `Hist2D`, `Hist3D` | Entries, Mean x/y(/z), Std Dev x/y(/z); `:underflow`/`:overflow` print ROOT's flow table |
+| `Profile1D` | Entries, Mean, Mean y, Std Dev, Std Dev y |
+| `Profile2D`, `Profile3D`, `PolygonHist2D` | ROOT's TProfile2D/TProfile3D/TH2Poly box |
+| `GraphSeries` with `attached_fit` | fit box only (`stats` is not accepted; ROOT has no graph statistics) |
+| `HistStack` | none: ROOT draws no box for a THStack, so `stats` is rejected |
+| Overlays `render_root([h1, h2, …]; draw=[…])` | box of layer 1, plus one per layer drawn with `SAMES` (stacked below, text in the layer color) |
+
+**Entries and moments.** ROOT's Entries is the number of `Fill` calls, and its
+Mean/Std Dev use the unbinned sums of the in-range entries. `histogram` records
+both (`hist.entries`, including under/overflow fills, and `hist.moments` =
+`(Σw, Σw², Σwx, Σwx²[, …])` in `TH1::GetStats` order), plus the flow bins,
+which are filled into ROOT's under/overflow bins. The box therefore matches a
+ROOT histogram filled event by event. A `Hist1D`/`Hist2D`/`Hist3D` built
+directly from bin contents has `entries === nothing` and no moments: ROOT then
+shows the **effective entries** `(Σw)²/Σw²` (`TH1::ResetStats`) and bin-centre
+moments, as for any ROOT histogram whose fill history is unknown. Pass
+`entries=…`, `moments=…`, `underflow=…`, `overflow=…` (or `bins_with_flow=…`
+for 2D/3D) to the constructors to supply them. `rebin` keeps them (like
+`TH1::Rebin`); `projection` returns plain visible-bin histograms. With
+explicit `xlimits` on a raw-option histogram, ROOT recomputes the statistics
+from the bins inside the range.
+
+**Fit box.** `attached_fit` attaches the fitted function to the native object
+as a `TF1` with the fitted parameters, errors, χ², ndf, and fixed flags, so the
+fit box lines come from ROOT (`Prob` is `TMath::Prob(χ², ndf)`). Parameter
+names are ROOT's: `Constant`, `Mean`, `Sigma` for `:gaus`; `p0`, `p1`, … for
+the other models. For likelihood fits the χ² line shows the stored fit
+statistic (`fit.chi2`). The TF1 is drawn by ROOT over `fit.range` with ROOT's
+default function style.
+
+**Placement.** `:auto` is ROOT's default (`gStyle` StatX/StatY: top-right
+corner of the pad, partly over the frame); on 2D/3D drawings with a color
+palette (`Z` options such as `COLZ`) the box moves left of the palette. The
+corner symbols place the box inside the frame corner, and an NDC tuple sets it
+exactly. A box whose lines would not fit ROOT's default width at ROOT's
+line-height text size is widened to the left (keeping its right edge), so long
+fields such as `Mean = 0.0282 ± 0.0224` stay readable. An automatic legend
+(`legend=:topright` etc., no `legend_spec`) that would overlap the box is moved
+below it (or above it for bottom corners); an explicit `legend_spec` is never
+moved. In a `PlotFigure` each panel keeps its own options.
+
+**Headroom.** As in ROOT, the default top-right box is drawn over the frame
+and may cover data. `stats_headroom=true` applies the usual ROOT remedy
+(`SetMaximum`): the y maximum is raised until every bin, drawn error bar,
+graph point, and fit-function value in the horizontal span of the box lies
+below it; the box position and the y minimum are unchanged, and nothing changes
+when the data already clear the box. It applies to 1-D histograms, profiles,
+graphs, and 1-D figure panels with a box at `:auto`, `:topright`,
+`:topleft` or an NDC box in the upper half of the frame, and it cannot be
+combined with explicit `ylimits`.
+
+```julia
+render_root(h, spec, "output/fit"; draw=:e1, stats=true, fitstats=true,
+            attached_fit=fit, stats_headroom=true)
+```
+
+**Testing hook.** If the environment variable `ROOTPLOTS_STATS_DUMP` names a
+file, the native renderer appends each box's NDC position, printed lines, and
+ROOT's full-precision values (`GetEntries`, `GetMean`, `GetStdDev`, fit
+parameters) to it, followed for 1-D frames by a `FRAME` record (y range in pad
+coordinates, highest data point under the box and lowest box edge in NDC). The
+test suite uses it to compare boxes with Julia values.
+
 ## 2D scalar fields and 3D plots
 
 Here **2D** means a value `z(x, y)` shown as color or contours, not the planar
@@ -667,8 +797,10 @@ Grids support linear/log coordinates and TH3 volume options.
 `Graph3DSpec(draw=:surface|:triangles|:heatmap|:contour, interpolate=true, resolution=(40, 40))`
 is explicit scattered-point interpolation. Log axes for XYZ points are not yet
 supported. 3D grid surfaces need at least two cells per axis, and XYZ data need at
-least two distinct x and y values. Use `PlotPanel/PlotFigure` for ND axis styles,
-ranges, color ranges, explicit contour levels, and multiple pads. 2D/3D fitting
+least two distinct x and y values. Axis styles (`xaxis`, `yaxis`, `zaxis`; the z
+style also formats the palette) and `canvas` are fields of both specs; use
+`PlotPanel/PlotFigure` for ranges, color ranges, explicit contour levels, and
+multiple pads. 2D/3D fitting
 is not implemented; analytic TF2/TF3 drawing is described under
 [Analytic TF2/TF3](#analytic-tf2tf3-and-sampled-julia-functions).
 
@@ -696,6 +828,111 @@ Component colors are set per `Component`. When a panel omits its ratio range, th
 `ratio_limits` keyword of `render_root` is used. `PanelSpec`'s `annotation` and
 `lumi` are free text drawn above the frame; no experiment label is added.
 
+## Experiment styles
+
+`style` selects a ROOT `TStyle` for the canvas, and `cms_label` / `atlas_label` draw
+an experiment label with ROOT `TLatex`. Both are opt-in: without them nothing
+changes.
+
+| Option | Specs | ROOT |
+|---|---|---|
+| `style=:Name` | `GraphSpec`, `Graph2DSpec`, `Graph3DSpec`, `PanelSpec`, `PlotFigure` | `gROOT->SetStyle("Name")` before any canvas or histogram exists |
+| `cms_label` | the same specs except `PlotFigure` | `TLatex`: "CMS" (font 61), extra text (font 52), luminosity/energy (font 42) |
+| `atlas_label` | the same specs except `PlotFigure` | `TLatex`: "ATLAS" (font 72), text and lines (font 42) |
+
+**Styles.** Names are matched case-insensitively against ROOT's style list
+(`gROOT->GetListOfStyles()`); `root_styles()` returns them, e.g. `"ATLAS"`,
+`"BELLE2"`, `"Bold"`, `"Classic"`, `"Default"`, `"Modern"` (ROOT's default), `"Plain"`,
+`"Pub"`, `"Video"`, plus `"CMS"`. An unknown name fails in the native backend with the
+list of available names. No `gROOT->ForceStyle()` is used: nothing is read from a
+file, and every object is created after the style is selected, so it takes the
+style's attributes, while explicit settings applied afterwards keep their values.
+
+- Explicit options win: `AxisStyle`, `CanvasStyle` (margins, ticks, grids, title box),
+  `LegendSpec`, statistics/fit-box options, and draw options are applied after the
+  style. The package's opt-in boxes stay off (`SetOptStat(0)`, `SetOptFit(0)`,
+  `SetOptTitle(0)`) until requested, whatever the style says.
+- Package layout defaults yield to the style where they are cosmetic: flat 2-D
+  views (Hist2D, Grid2D, profiles, TF2) keep the style's left/bottom/top margins
+  (a palette still gets room on the right: at least 0.18, or 0.2 with a title, widened
+  until the palette labels, `×10^n` exponent and z title fit at the style's z label and
+  title sizes, with a z title offset clear of the labels; a top margin too small for
+  the exponent grows as well);
+  automatic legends use 0.8 x the style's label size; the fit/pull and
+  comparison views take the style's side margins, ticks, and text sizes,
+  rescaled to each pad's height so text keeps its one-pad size, and the
+  comparison legend moves into the frame. 3-D views keep the package's margins.
+- The style is process-global (one per canvas): figure panels and comparison
+  panels that name a style must agree. `PlotFigure(...; style=:CMS)` gives the
+  style to every panel spec without one.
+
+**CMS.** ROOT has no built-in CMS style. `style=:CMS` creates a `"CMS"` `TStyle` in the
+backend from ROOT setters, with values that follow the public CMS publication
+style conventions: white canvas, pads and frame without borders; no statistics,
+title, date or file boxes; Helvetica (font 42) for all text; axis title size
+0.06 (x offset 0.9, y offset 1.25), label size 0.05 (offset 0.007); ticks on all
+four frame sides (`SetPadTickX/Y(1)`), tick length 0.03, 510 divisions; pad margins
+top 0.08, bottom 0.13, left 0.16, right 0.04; markers 20, function line width 2,
+end-error size 2. The palette is the package's `palette` option (viridis by
+default). In the comparison view, y-axis numbers use an exponent above 999
+(`TAxis::SetMaxDigits(3)`; `yaxis=AxisStyle(max_digits=...)` overrides).
+
+The single switch is `style=:CMS`: it also draws the default label
+"CMS Preliminary". `cms_label` refines or removes it:
+
+| `cms_label` | Effect |
+|---|---|
+| `nothing` (default) | label "CMS" + "Preliminary" when `style=:CMS`, otherwise none |
+| `false` / `true` | no label / default label (with any style) |
+| `(extra=..., lumi=..., energy=..., position=...)` | fields below |
+
+- `extra`: text after "CMS" (default `"Preliminary"`; e.g. `"Simulation"`, `"Private Work"`;
+  `""` for none), in italics (font 52), 0.76 x the "CMS" size.
+- `lumi`, `energy`: text above the frame on the right, `"lumi (energy)"`, e.g.
+  `cms_label=(lumi="138 fb^{-1}", energy="13 TeV")` gives "138 fb^{-1} (13 TeV)";
+  `energy` alone gives "(13 TeV)". A comparison panel's `lumi` is used when neither
+  is given.
+- `position`: `:inside_left` (default for 1-D plots; "CMS" bold, font 61, inside the
+  frame at the top left with the extra text below it), `:inside_right`, or `:outside`
+  ("CMS" and the extra text on one line above the frame at the left; the default
+  for 2-D/3-D views so the label does not cover coloured cells).
+- Sizes follow the CMS convention of scaling with the pad's top margin: "CMS" is
+  0.75 x the top margin, the luminosity text 0.6 x. In figure pads they scale with
+  each pad; in the upper pad of a two-pad view they keep their one-pad size.
+
+**ATLAS.** `style=:ATLAS` selects ROOT's built-in `"ATLAS"` style unchanged.
+`atlas_label=(text="Internal", energy="13 TeV", lumi="140 fb^{-1}")` draws
+"ATLAS" in bold italics (font 72) followed by the text (font 42, default
+`"Internal"`; e.g. `"Preliminary"`), and a second line "#sqrt{s} = 13 TeV, 140 fb^{-1}"
+below it, at the style's text size (`gStyle->GetTextSize()`, 0.05 in the ATLAS
+style). `position=:inside_left` (default), `:inside_right`, or `:outside` (the
+second line goes above the frame on the right; when the row is too narrow for
+both, it is stacked under "ATLAS <text>" at the left). The ATLAS label is opt-in;
+`atlas_label=true` draws "ATLAS Internal".
+
+**Room above the frame.** Label texts drawn above the frame (outside labels, the
+CMS luminosity text) always end inside their pad: unless `CanvasStyle(top_margin=...)`
+fixes it, the pad's top margin grows until they fit with a small white edge
+(e.g. the outside ATLAS label under the ATLAS style's 0.05 top margin, in single
+canvases, figure pads and the upper pad of two-pad views). With a fixed top margin
+too small for them, the texts move down instead.
+
+**Comparison panels** (`PanelSpec`): with a style or a label, both pads span the full
+canvas height and take the style's margins and text sizes as described above. A
+label carries the panel texts: `lumi` is the CMS luminosity text (or the ATLAS
+second line) and `annotation` a line below the label. Without a label, under a
+style, `annotation` and `lumi` are drawn above the frame (left and right).
+
+**Fit/pull view**: the label goes to the upper pad.
+
+The CMS and ATLAS labels are for collaboration use under each collaboration's
+publication rules; the package only provides the styling.
+
+Testing hook: `ROOTPLOTS_AXIS_DUMP` also records the selected `gStyle` (`GSTYLE` row:
+name, pad margins, label/title font and size, pad ticks, `OptStat`) and every
+`TLatex` in each pad (`LATEX` rows: text, font, size, position, alignment, NDC flag);
+see `test/experiment_style_tests.jl` and `scripts/experiment_style_demo.jl`.
+
 ## Backend architecture
 
 ```text
@@ -714,3 +951,152 @@ identity across Unicode text, fonts, or operating systems is not guaranteed.
 are not printed, while ROOT warnings and errors still reach stderr. With the
 environment variable `ROOTPLOTS_ROOT_VERBOSE=1` the processes keep ROOT's
 default message level (e.g. `withenv("ROOTPLOTS_ROOT_VERBOSE" => "1") do ... end`).
+
+## Axes, titles and number format
+
+ROOTPlots is a Julia front end to ROOT's own drawing, so every option below is
+one ROOT setter with a recognisable name, applied by ROOT to the drawn axis or
+pad. Leaving a field at `nothing` keeps ROOT's default (or the documented layout
+default of the painter); nothing is reformatted in Julia. All options are
+opt-in: existing plots are unchanged.
+
+```julia
+spec = GraphSpec(xlabel="Energy (keV)", ylabel="Events", title="Spectrum", logx=true, logy=true,
+    xaxis=AxisStyle(more_log_labels=true, title_offset=1.3),
+    yaxis=AxisStyle(no_exponent=true, label_color="#cc3311"),
+    canvas=CanvasStyle(grid_x=true, grid_y=true, opt_title=true, title_x=0.15, title_align=13))
+render_root(h, spec, "output/spectrum"; draw="E1")
+```
+
+### AxisStyle and LabelChange
+
+| field | ROOT call | notes |
+|---|---|---|
+| `title_font`, `title_size`, `title_offset`, `title_color` | `TAxis::SetTitleFont/Size/Offset/Color` | |
+| `label_font`, `label_size`, `label_offset`, `label_color` | `TAxis::SetLabelFont/Size/Offset/Color` | |
+| `axis_color` | `TAxis::SetAxisColor` | axis line and ticks |
+| `tick_length` | `TAxis::SetTickLength` | |
+| `ticks` | `TAxis::SetTicks("+" / "-" / "+-")` | tick side; `CanvasStyle.ticks_x/y` add ticks on the opposite frame edge (`TPad::SetTickx/y`) |
+| `divisions`, `optimize_divisions` | `TAxis::SetNdivisions(n, optim)` | `optimize_divisions=false` keeps exactly `n` (ROOT stores `-n`) |
+| `max_digits` | `TAxis::SetMaxDigits` | |
+| `no_exponent` | `TAxis::SetNoExponent` | 400000 instead of 400 ×10³ |
+| `more_log_labels` | `TAxis::SetMoreLogLabels` | label 2, 3, 5, … on short log ranges |
+| `decimals` | `TAxis::SetDecimals` | 1.0 instead of 1 next to 0.5 |
+| `center_title`, `center_labels` | `TAxis::CenterTitle`, `TAxis::CenterLabels` | |
+| `time_display`, `time_format` | `TAxis::SetTimeDisplay`, `TAxis::SetTimeFormat` | strftime format; ROOT's `%F` offset syntax is accepted |
+| `time_offset` | `TAxis::SetTimeOffset(t, "gmt")` | UNIX time (s) of axis value 0, always GMT for reproducible output |
+| `exponent_offset` | `TGaxis::SetExponentOffset(dx, dy, "x"/"y")` | static in ROOT: one value per direction per canvas (conflicts are rejected) |
+| `bin_labels` | `TAxis::SetBinLabel(bin, label)` | histogram bin axes only; strings (bins 1, 2, …), `bin => label` pairs, or a Dict |
+| `labels_option` | `TAxis::LabelsOption("h"/"v"/"u"/"d")` | orientation of bin labels; needs `bin_labels` |
+| `change_labels` | `TAxis::ChangeLabel` | vector of `LabelChange(index; angle, size, align, color, font, text)` |
+
+`LabelChange(index; ...)` follows ROOT's `ChangeLabel(labNum, labAngle, labSize,
+labAlign, labColor, labFont, labText)`: `index` 1 is the first drawn label and -1
+the last; unset fields keep the label's attribute; `size=0` hides a label.
+`ChangeLabel` acts on numeric labels, not on bin labels, as in ROOT.
+
+Bin labels name histogram bins, so they are accepted where the drawn axis is a
+histogram axis: Hist1D (all draw modes; a default `:steps` plot then draws the
+native TH1D as `HIST`, and an owned frame takes the histogram's binning), Hist1D
+overlays and Hist1D+graph plots, stacks, profiles, Hist2D/Hist3D/Grid2D/Grid3D
+axes, the first Hist1D layer of a 1-D panel, and the comparison x axis. Graphs,
+functions, XYZ graphs, TF2/TF3, TH2Poly and special graphs have no bin axis and
+reject them (use `change_labels` there). Bin indices are checked against the
+bin count before ROOT runs.
+
+### CanvasStyle: grids and the ROOT title box
+
+| field | ROOT call |
+|---|---|
+| `grid_x`, `grid_y` | `TPad::SetGridx/SetGridy` |
+| `opt_title` | `gStyle->SetOptTitle`: ROOT draws the plot title as its `TPaveText` "title" |
+| `title_x`, `title_y`, `title_w`, `title_h` | `gStyle->SetTitleX/Y/W/H` (NDC; 0 = ROOT's automatic size) |
+| `title_align` | `gStyle->SetTitleAlign` (ROOT default 23: centred at the top) |
+| `title_font`, `title_font_size` | `gStyle->SetTitleFont(font, "t")`, `gStyle->SetTitleFontSize` |
+| `title_border_size`, `title_fill_color`, `title_style`, `title_text_color` | `gStyle->SetTitleBorderSize/SetTitleFillColor/SetTitleStyle/SetTitleTextColor` |
+
+By default (`opt_title` unset) a non-empty title is the package's TLatex heading
+at the top left, exactly as before. With `opt_title=true` the title string goes to
+`TH1::SetTitle` of the frame, so ROOT's `"title;x title;y title"` form also sets the
+axis titles. The `title_*` fields require `opt_title=true`. gStyle is process-global:
+the values are set only while ROOT creates this pad's title box, and the box is
+then kept (`TH1::kNoTitle` on the frame), so each pad of a figure has its own
+title settings. Polar and pie charts have no Cartesian frame and reject axis
+styles, grids, and the title box.
+
+### 2D/3D, panels, and two-pad views
+
+- `Graph2DSpec`/`Graph3DSpec` have `xaxis`, `yaxis`, `zaxis`, and `canvas`. The z style of
+  a 2-D view also formats the palette, because ROOT's palette axis imports the
+  histogram's z-axis attributes. Explicit `canvas` margins override the painter's
+  layout margins (e.g. the palette margin); an explicit z `title_offset` is kept as given.
+- `PlotPanel` keeps its `xaxis`/`yaxis`/`zaxis`/`canvas` keywords; for 2D/3D panels the
+  spec's fields are the defaults the keywords override. Nested figures apply the
+  same settings per pad.
+- `PanelSpec` (comparison with ratio pad): `xaxis` styles the shared x axis (drawn
+  on the ratio pad; the upper pad keeps hidden labels but the same divisions/time
+  settings), `yaxis` the upper y axis, `ratio_yaxis` the ratio y axis, and
+  `canvas` accepts `grid_x`, `grid_y`, `ticks_x`, `ticks_y` for both pads.
+- Fit/pull figure (`render_root(h, fit, spec, stem)`): `xaxis` applies to both pads,
+  `yaxis` to the upper pad, grids/ticks to both pads, and the title box to the
+  upper pad. Its margins, annotations, and legend stay layout-owned.
+
+### Coverage (audit)
+
+The table records, per entry point, the state before this feature → now.
+"AxisStyle" means the full field set above; "basic" is the earlier subset
+(fonts, sizes, offsets, tick length, divisions, max digits, centred title).
+
+| entry point | log x / y / z | plot title | axis titles | AxisStyle | CanvasStyle (grids, title box) |
+|---|---|---|---|---|---|
+| graphs `render_root(series, GraphSpec)` | x, y | TLatex → TLatex or ROOT box | x, y | basic x/y → x/y | no grids → yes |
+| Hist1D presets, raw options, `:steps` | x, y | TLatex → TLatex or ROOT box | x, y | basic → full (bin labels included) | → yes |
+| Hist1D overlays, Hist1D + graphs | x, y | TLatex → TLatex or ROOT box | x, y | basic → full | → yes |
+| mixed layers / bent & multi-error graphs (panel) | x, y | TLatex → TLatex or ROOT box | x, y | basic → full | → yes |
+| `ModelCurve` (TF1) | x, y | TLatex → TLatex or ROOT box | x, y | basic → full (no bin labels) | → yes |
+| `HistStack` | x, y | TLatex → TLatex or ROOT box | x, y | basic → full | → yes |
+| `Profile1D` | x, y | TLatex → TLatex or ROOT box | x, y | basic → full | → yes |
+| `Profile2D`/`Profile3D` | x, y, z | TLatex → TLatex or ROOT box | x, y, z | none → x/y/z | none → yes |
+| `PolygonHist2D` (TH2Poly) | x, y, z | TLatex → TLatex or ROOT box | x, y, z | none → x/y/z (no bin labels) | none → yes |
+| `Grid2D` heatmap/contour/raw, overlays | x, y, z | TLatex → TLatex or ROOT box | x, y, z | none → x/y/z (+palette) | none → yes |
+| `Grid2D` surface (`Graph3DSpec`), `Grid3D` (TH3) | x, y, z | TLatex → TLatex or ROOT box | x, y, z | none → x/y/z | none → yes |
+| `Hist2D`/`Hist3D` (one panel) | x, y, z | TLatex → TLatex or ROOT box | x, y, z | basic via panel keywords → full, also from the spec | panel keyword → also from the spec |
+| `Graph3D`/`Graph3DErrors` (XYZ) | rejected (ROOT's TGraph2D painter) | TLatex → TLatex or ROOT box | x, y, z | none → x/y/z (no bin labels) | none → yes |
+| `ModelSurface` (TF2) | x, y, z | TLatex → TLatex or ROOT box | x, y, z | none → x/y/z (no bin labels) | none → yes |
+| `ModelVolume` (TF3) | rejected (batch TF3 painters) | TLatex → TLatex or ROOT box | x, y, z | none → x/y/z (no bin labels) | none → yes |
+| QQ, spline, efficiency | x, y | TLatex → TLatex or ROOT box | x, y | basic → full (no bin labels) | → yes |
+| polar, pie | not applicable | TLatex | n/a | silently ignored → rejected | grids/title box rejected |
+| `PlotPanel`/`PlotFigure`, nested | per panel as above | per pad | per pad | per pad | per pad |
+| comparison (`PanelSpec`) | x (both pads), y, ratio y | annotation/lumi text | x, y | none → x, y, ratio y | none → grids, ticks |
+| fit/pull two-pad | x (both), y (upper) | TLatex → TLatex or ROOT box | x, y | rejected → x (both pads), y | rejected → grids, ticks, title box |
+
+Log scales were already available wherever ROOT's batch painters support them;
+the remaining exceptions are ROOT limitations (XYZ graph points/errors and TF3),
+and polar/pie charts, whose axes are not Cartesian.
+
+### Not exposed, and why
+
+- **Reversed axes**: ROOT 6.40 has no reversed-axis option for TH1 painting
+  (`"RX"` is ignored by THistPainter); TGraph's `"RX"/"RY"` work only when the graph
+  draws its own axes, while ROOTPlots draws graphs on an owned frame.
+- **`SetRangeUser`**: covered by `xlimits`/`ylimits` (GraphSpec), `ymin`/`ymax`/`ratio_limits`
+  (PanelSpec), and the `xlimits`/`ylimits`/`zlimits` keywords of 2D/3D panels
+  (`render_root(h2, spec, stem; xlimits=...)` forwards them).
+- **Global `TGaxis::SetMaxDigits`**: the per-axis `TAxis::SetMaxDigits` (`max_digits`) does the
+  same without leaking into other pads.
+- **Sorting `LabelsOption` ("a", ">", "<")**: reorders bin contents, a data
+  operation rather than a display option. `ChangeLabelByValue` is not exposed.
+- **`logz` in CanvasStyle**: z scales belong to `Graph2DSpec`/`Graph3DSpec` (`logz`);
+  1-D views have no z axis.
+- The pull axis of the fit/pull figure and the comparison layout's margins and
+  title area are layout-owned.
+
+### Testing hook
+
+With the environment variable `ROOTPLOTS_AXIS_DUMP=<file>` both native bridges
+append, just before the image is saved, each pad's ROOT state (`GetLogx/y/z`,
+`GetGridx/y`, `GetTickx/y`, margins, the "title" box text and attributes) and the
+frame axes as ROOT reports them (`GetNdivisions`, `GetMaxDigits`, `GetNoExponent`,
+`GetMoreLogLabels`, `GetDecimals`, `GetTicks`, `GetTimeDisplay`/`GetTimeFormat`, colours,
+sizes, bin labels, `ChangeLabel` entries). `test/axis_format_tests.jl` checks these
+values; `scripts/axis_format_demo.jl` draws every option.

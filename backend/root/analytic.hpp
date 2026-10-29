@@ -56,6 +56,7 @@ AnalyticDrawing paint_tf2(const std::vector<std::vector<std::string>> &rows,TPad
   check(theta>=0 && theta<=180 && phi>=-180 && phi<=180,"invalid TF2 view");
   bool logx=bit(f[8]),logy=bit(f[9]),logz=bit(f[10]);
   auto labels=read_labels(rows,at);
+  auto scene=read_scene(rows,at);
   check(at<rows.size() && rows[at].size()>=12 && rows[at][0]=="TF2","missing TF2");
   const auto v=rows[at++];
   std::string model=v[1];
@@ -87,20 +88,28 @@ AnalyticDrawing paint_tf2(const std::vector<std::vector<std::string>> &rows,TPad
   // Same color-level policy as Grid2D: explicit count for contours, fine levels otherwise.
   tf2->SetContour(upper.find("CONT")!=std::string::npos ? contours : three_d ? 80 : 255);
   pad.cd(); pad.SetLogx(logx); pad.SetLogy(logy); pad.SetLogz(logz);
-  pad.SetLeftMargin(0.14); pad.SetBottomMargin(0.13);
+  // A selected ROOT style keeps its margins on flat views; a palette still gets room.
+  const bool style_margins=style_selected() && !three_d;
+  if(!style_margins) { pad.SetLeftMargin(0.14); pad.SetBottomMargin(0.13); }
   if(three_d) { pad.SetRightMargin(0.22); pad.SetTheta(theta); pad.SetPhi(phi); }
-  else pad.SetRightMargin(upper.find('Z')!=std::string::npos ? 0.18 : 0.08);
+  else if(upper.find('Z')!=std::string::npos) pad.SetRightMargin(0.18);
+  else if(!style_margins) pad.SetRightMargin(0.08);
+  apply_canvas(pad,scene); // explicit CanvasStyle values win over the layout defaults
   tf2->Draw(option.c_str());
   pad.Update();
-  if(auto *h=tf2->GetHistogram()) {
+  TH1 *h=tf2->GetHistogram();
+  if(h) {
     h->GetXaxis()->SetTitle(labels.x.c_str()); h->GetYaxis()->SetTitle(labels.y.c_str());
     h->GetZaxis()->SetTitle(labels.z.c_str());
     if(three_d) { h->GetXaxis()->SetTitleOffset(1.5); h->GetYaxis()->SetTitleOffset(1.5); h->GetZaxis()->SetTitleOffset(1.3); }
+    apply_axes(h,scene);
+    if(!three_d) palette_title_room(pad,h,flat_palette(option,2),scene.canvas,scene.axes[2].v[AX_TITLE_OFFSET]=="-");
   }
-  out.function=std::move(tf2);
   out.heading=std::make_unique<TLatex>();
   out.heading->SetNDC(); out.heading->SetTextSize(0.035);
-  if(!labels.title.empty()) out.heading->DrawLatex(0.13,0.94,labels.title.c_str());
+  if(root_title(pad,h,labels.title,scene.canvas)) tf2->SetTitle(labels.title.c_str());
+  else if(!labels.title.empty()) out.heading->DrawLatex(0.13,0.94,labels.title.c_str());
+  out.function=std::move(tf2);
   return out;
 }
 AnalyticDrawing paint_tf3(const std::vector<std::vector<std::string>> &rows,TPad &pad) {
@@ -113,6 +122,7 @@ AnalyticDrawing paint_tf3(const std::vector<std::vector<std::string>> &rows,TPad
   double theta=real(f[5]),phi=real(f[6]);
   check(theta>=0 && theta<=180 && phi>=-180 && phi<=180,"invalid TF3 view");
   auto labels=read_labels(rows,at);
+  auto scene=read_scene(rows,at);
   check(at<rows.size() && rows[at].size()>=17 && rows[at][0]=="TF3","missing TF3");
   const auto v=rows[at++];
   std::string model=v[1];
@@ -138,16 +148,20 @@ AnalyticDrawing paint_tf3(const std::vector<std::vector<std::string>> &rows,TPad
   int c=TColor::GetColor(v[13].c_str());
   tf3->SetLineColor(c); tf3->SetLineWidth(width); tf3->SetLineStyle(line_style); tf3->SetFillColor(c);
   pad.cd(); pad.SetLeftMargin(0.14); pad.SetBottomMargin(0.13); pad.SetTheta(theta); pad.SetPhi(phi);
+  TH1 *frame=nullptr;
   if(mode=="iso") {
     pad.SetRightMargin(0.08);
+    apply_canvas(pad,scene);
     tf3->Draw("");
     pad.Update();
     if(auto *h=tf3->GetHistogram()) {
       h->GetXaxis()->SetTitle(labels.x.c_str()); h->GetYaxis()->SetTitle(labels.y.c_str()); h->GetZaxis()->SetTitle(labels.z.c_str());
       h->GetXaxis()->SetTitleOffset(1.5); h->GetYaxis()->SetTitleOffset(1.5); h->GetZaxis()->SetTitleOffset(1.3);
+      apply_axes(h,scene); frame=h;
     }
   } else {
     pad.SetRightMargin(0.22);
+    apply_canvas(pad,scene);
     out.sampled=std::make_unique<TH3D>("rootplots_tf3_sampled","",np[0],lo[0],hi[0],np[1],lo[1],hi[1],np[2],lo[2],hi[2]);
     out.sampled->SetDirectory(nullptr); out.sampled->SetStats(false);
     for(int i=1;i<=np[0];++i) for(int j=1;j<=np[1];++j) for(int k=1;k<=np[2];++k) {
@@ -164,11 +178,13 @@ AnalyticDrawing paint_tf3(const std::vector<std::vector<std::string>> &rows,TPad
     out.sampled->GetZaxis()->SetTitleOffset(1.3);
     // Bins at or below the iso level are not drawn, so both modes show the region f > level.
     out.sampled->SetMinimum(level);
+    apply_axes(out.sampled.get(),scene); frame=out.sampled.get();
     out.sampled->Draw("BOX2Z");
   }
-  out.function=std::move(tf3);
   out.heading=std::make_unique<TLatex>();
   out.heading->SetNDC(); out.heading->SetTextSize(0.035);
-  if(!labels.title.empty()) out.heading->DrawLatex(0.13,0.94,labels.title.c_str());
+  if(root_title(pad,frame,labels.title,scene.canvas)) tf3->SetTitle(labels.title.c_str());
+  else if(!labels.title.empty()) out.heading->DrawLatex(0.13,0.94,labels.title.c_str());
+  out.function=std::move(tf3);
   return out;
 }

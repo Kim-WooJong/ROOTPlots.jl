@@ -71,12 +71,13 @@ function write_function_spec(path,curve::ModelCurve,spec::GraphSpec,limits)
     return path
 end
 write_function_spec(path,curve::ModelCurve,spec::GraphSpec) =
-    write_function_spec(path,curve,spec,model_curve_limits(curve,spec))
+    write_function_spec(path,curve,check_spec_bins(spec,"a TF1"),model_curve_limits(curve,spec))
 
 function render_root(curve::ModelCurve,spec::GraphSpec,outstem::AbstractString;
                      format=:png,root_config=nothing)
     paths=plot_output_paths(outstem,format)
     limits=model_curve_limits(curve,spec)
+    check_spec_bins(spec,"a TF1")
     config=find_root_config(root_config)
     config===nothing && throw(ArgumentError("local native ROOT not found"))
     exe=graphfit_executable(config)

@@ -184,6 +184,7 @@ function validate_analytic_spec(s::ModelSurface, spec)
     values = [analytic_value(s.model, s.parameters, x, y) for x in xs, y in ys]
     all(isfinite, values) || throw(ArgumentError("TF2 evaluates to non-finite values on its grid"))
     spec.logz && !all(>(0), values) && throw(ArgumentError("log z needs positive TF2 values on the drawing grid"))
+    check_spec_bins(spec, "a TF2")
     return option, extrema(values)
 end
 
@@ -193,6 +194,7 @@ function validate_analytic_spec(v::ModelVolume, spec)
     validate_nd_spec(Graph3DSpec(; (k => getfield(spec, k) for k in fieldnames(Graph3DSpec) if k != :draw)...,
                                  draw=:surface))
     (spec.logx || spec.logy || spec.logz) && throw(ArgumentError("ModelVolume does not support log axes"))
+    check_spec_bins(spec, "a TF3")
     centers(r, n) = [r[1] + (i - 0.5) * (r[2] - r[1]) / n for i in 1:n]
     for x in centers(v.xrange, v.npx), y in centers(v.yrange, v.npy), z in centers(v.zrange, v.npz)
         isfinite(analytic_value(v.model, v.parameters, x, y, z)) ||

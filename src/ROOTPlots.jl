@@ -8,7 +8,7 @@ using Scratch: @get_scratch!
 export Hist1D, Component, BinErrors, PanelSpec, PlotStyle, comparison,
        histogram, render_root, root_available, build_root, rootmap, RootMapError,
        GraphSeries, GraphSpec, GraphStyle, FitResult, fit_root, fit_curve,
-       AxisStyle, CanvasStyle, PlotLine, PlotText, LegendSpec, LegendEntry,
+       AxisStyle, LabelChange, CanvasStyle, PlotLine, PlotText, LegendSpec, LegendEntry,
        Grid2D, Grid3D, Graph3D, Graph2DSpec, Graph3DSpec,
        rebin, integral, effective_entries, binned_mean, binned_std,
        binned_mean_error, histstats, fit_correlation, fit_residuals, chi2_pvalue,
@@ -19,16 +19,17 @@ export Hist1D, Component, BinErrors, PanelSpec, PlotStyle, comparison,
        PlotPrimitive, PlotArrow, PlotBox, PlotEllipse, SecondaryAxis,
        PolarGraph, QQGraph, SplineCurve, PieChart, EfficiencyGraph, spline_points, efficiency_points, qq_points,
        BentErrorSeries, MultiErrorSeries, YErrorSet, total_yerrors,
-       ModelSurface, ModelVolume, function_grid, PlotPolygon
+       ModelSurface, ModelVolume, function_grid, PlotPolygon, root_styles
 
 include("histograms.jl")
 include("histogramnd.jl")
 include("tables.jl")
+include("scene.jl")
 include("comparison.jl")
 include("presentation.jl")
 include("root_backend.jl")
-include("scene.jl")
 include("graphfit.jl")
+include("statsbox.jl")
 include("statistics.jl")
 include("histdraw.jl")
 include("graphnd.jl")
