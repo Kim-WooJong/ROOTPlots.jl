@@ -37,7 +37,8 @@ releases, so references are environment-specific by design.
 
 | Date | OS | Julia | ROOT | Result |
 | --- | --- | --- | --- | --- |
-| 2026-10-29 | macOS (arm64) | 1.12.6 | 6.40.04 | full native suite, visual references recorded here |
+| 2026-10-29 | macOS (arm64) | 1.12.6 | 6.40.04 | full native suite (830/830), visual references recorded here |
+| 2026-10-29 | Linux EL9 (x86_64), LCG_110 clang 22 | 1.12.2 | 6.40.02 | doctor PASS; full native suite 818/818, visual comparison skipped (different reference environment) |
 
 Other combinations within Julia 1.11+ / ROOT 6.40+ are supported targets but are
 not claimed as validated until they appear in this table. The GitHub Actions
