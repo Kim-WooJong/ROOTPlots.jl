@@ -7,8 +7,8 @@ plot specifications are Julia values; a small C++ bridge runs ROOT in isolated
 batch processes and writes PNG/PDF. No Julia plotting package, Python, PyCall, or
 GUI is required. ROOT itself must be installed separately.
 
-**Status:** experimental, local development only; not published or registered.
-The former package name was `JuliaROOT`. See [migration](docs/migration.md).
+**Status:** experimental (0.2.0). Source on GitHub; not registered in the Julia
+General registry. The former package name was `JuliaROOT`. See [migration](docs/migration.md).
 
 ![Synthetic ROOT graphics gallery](docs/images/overview.png)
 
@@ -21,23 +21,39 @@ The former package name was `JuliaROOT`. See [migration](docs/migration.md).
 - A ROOT-compatible C++ compiler; `c++` by default, or the executable set in `CXX`.
 - macOS/Linux are the development targets. Windows is not validated.
 
-From this source checkout:
+Install from GitHub into your Julia environment (recommended):
+
+```julia
+using Pkg
+Pkg.add(url="https://github.com/Kim-WooJong/ROOTPlots.jl")
+using ROOTPlots
+build_root()   # optional: compile the native bridges now (otherwise on first use)
+```
+
+ROOTPlots is **not registered in General**, so `Pkg.add("ROOTPlots")` does not
+work; use the URL form above. Pass `rev=` with a release tag or commit hash to pin
+a version.
+
+For development, work from a source checkout instead:
 
 ```sh
+git clone https://github.com/Kim-WooJong/ROOTPlots.jl
+cd ROOTPlots.jl
 julia --project=. -e 'using Pkg; Pkg.instantiate()'
 julia --project=. scripts/doctor.jl
 ```
 
-From a separate Julia analysis environment:
+and use `Pkg.develop(path="/absolute/path/to/ROOTPlots.jl")` from a separate
+analysis environment. Detailed setup, cache behavior, and server
+troubleshooting: [installation](docs/installation.md).
 
-```julia
-using Pkg
-Pkg.develop(path="/absolute/path/to/ROOTPlots-checkout")
-using ROOTPlots
-```
+### ROOT messages
 
-This is a path dependency, not `Pkg.add("ROOTPlots")` from General. Detailed
-setup, cache behavior, and server troubleshooting: [installation](docs/installation.md).
+ROOT's informational messages (for example `Info in <TCanvas::Print>: png file
+... has been created` for every saved file) are suppressed by default: the
+native processes set ROOT's message level to *warning*, so ROOT warnings and
+errors are still printed. Set `ROOTPLOTS_ROOT_VERBOSE=1` to restore ROOT's
+default verbosity, e.g. `withenv("ROOTPLOTS_ROOT_VERBOSE" => "1") do render_root(...) end`.
 
 ## Quick start
 
@@ -66,18 +82,21 @@ return paths are `nothing`. All example data are **synthetic, not measurements**
 | --- | --- |
 | Weighted 1D/2D/3D histograms, flows, projection | `histogram`, `Hist1D/2D/3D`, `projection` |
 | Points, curves, asymmetric errors and bands | `GraphSeries`, `GraphSpec`, `GraphStyle` |
+| Bent error bars; several y-error sets (stat/syst) | `BentErrorSeries`, `MultiErrorSeries`, `YErrorSet` |
 | Heatmaps, contours, surfaces, XYZ/error graphs | `Grid2D/3D`, `Graph3D`, `Graph3DErrors` |
-| Stacks, profiles, convex polygon bins | `HistStack`, `Profile1D/2D/3D`, `PolygonHist2D` |
+| Stacks, profiles, (non-convex) polygon bins | `HistStack`, `Profile1D/2D/3D`, `PolygonHist2D` |
 | ROOT fits, covariance and residual diagnostics | `fit_root`, `FitResult`, `chi2_pvalue` |
 | Native TF1, spline, QQ, polar, efficiency, pie | `ModelCurve`, `SplineCurve`, `QQGraph`, etc. |
-| Mixed panels, annotations, axes, legends | `PlotFigure`, `PlotPanel`, `AxisStyle`, `PlotText` |
+| Native TF2/TF3 from predefined formulas; sampled Julia grids | `ModelSurface`, `ModelVolume`, `function_grid` |
+| Mixed and nested panels, annotations, polygons, axes, legends | `PlotFigure`, `PlotPanel`, `PlotPolygon`, `AxisStyle`, `PlotText` |
 | Data/model comparisons with ratio panels | `comparison`, `Component`, `PanelSpec` |
 | Bounded parallel independent ROOT jobs | `rootmap` |
 
 Not a complete ROOT binding. No ROOT-file I/O, RDataFrame, GUI/OpenGL, RooFit,
-RooStats, or arbitrary C++/TF1-expression evaluation. Use tools such as UnROOT
-for input files. Nested layouts, arbitrary analytic TF2/TF3, nonconvex polygons,
-and multi/bent-error graphs are not implemented. See the
+RooStats, or arbitrary C++/TF1/TF2/TF3-expression evaluation: analytic functions
+come from a fixed list of named formulas, and other Julia functions are sampled.
+TF3 offers only batch-renderable (non-OpenGL) views; polygons with holes are not
+supported. Use tools such as UnROOT for input files. See the
 [API and scientific semantics](docs/api.md) for supported options and limits.
 
 ## Dependencies
@@ -100,6 +119,7 @@ julia --project=. scripts/demo.jl
 julia --project=. scripts/graphfit_demo.jl
 julia --threads=4 --project=. scripts/graphics_gallery.jl
 julia --project=. scripts/special_graph_demo.jl
+julia --project=. scripts/graph_extension_demo.jl
 julia --project=. scripts/edge_profile_demo.jl
 ```
 
@@ -128,8 +148,9 @@ builds/jobs, and pixel comparison of representative figures against reference
 PNGs. Pixel references are only comparable in the environment that produced them,
 and passing tests are not proof of scientific equivalence. See
 [testing](docs/testing.md) for modes and validated environments.
-The included GitHub Actions workflow is a configuration for future use; no
-remote CI result is implied before it actually runs.
+The included GitHub Actions workflow runs the rootless tests (Julia 1.11 and
+current) and the native ROOT suite (Linux, conda-forge ROOT) on GitHub-hosted
+runners; see [testing](docs/testing.md).
 
 ## License
 

@@ -208,21 +208,9 @@ void advanced_poly(const std::vector<std::vector<std::string>> &rows,size_t &at,
       polygon.x.push_back(x); polygon.y.push_back(y);
       xmin=std::min(xmin,x); xmax=std::max(xmax,x); ymin=std::min(ymin,y); ymax=std::max(ymax,y);
     }
-    int sign=0;
-    for(int i=0;i<n;++i) {
-      int j=(i+1)%n;
-      check(polygon.x[i]!=polygon.x[j] || polygon.y[i]!=polygon.y[j],"duplicate polygon neighbors");
-      for(int k2=0;k2<n;++k2) {
-        double cross=(polygon.x[j]-polygon.x[i])*(polygon.y[k2]-polygon.y[i])-
-                     (polygon.y[j]-polygon.y[i])*(polygon.x[k2]-polygon.x[i]);
-        check(std::isfinite(cross),"polygon geometry overflows");
-        if(cross==0) continue;
-        int direction=cross>0 ? 1 : -1;
-        if(sign==0) sign=direction;
-        check(sign==direction,"polygon must be convex and ordered without intersections");
-      }
-    }
-    check(sign!=0,"polygon has zero area"); polygons.push_back(std::move(polygon));
+    // Simple polygons only: convex or non-convex, no holes or self-intersections.
+    check_simple_polygon(polygon.x,polygon.y);
+    polygons.push_back(std::move(polygon));
   }
   check(xmin<xmax && ymin<ymax && (!h.logx || xmin>0) && (!h.logy || ymin>0),"invalid polygon range");
   auto poly=std::make_unique<TH2Poly>("rootplots_polygon","",xmin,xmax,ymin,ymax);

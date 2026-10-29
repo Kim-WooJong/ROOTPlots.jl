@@ -37,9 +37,18 @@ releases, so references are environment-specific by design.
 
 | Date | OS | Julia | ROOT | Result |
 | --- | --- | --- | --- | --- |
-| 2026-10-29 | macOS (arm64) | 1.12.6 | 6.40.04 | full native suite (830/830), visual references recorded here |
+| 2026-10-29 | macOS (arm64) | 1.12.6 | 6.40.04 | full native suite incl. graph extensions (978/978), visual references recorded here |
 | 2026-10-29 | Linux EL9 (x86_64), LCG_110 clang 22 | 1.12.2 | 6.40.02 | doctor PASS; full native suite 818/818, visual comparison skipped (different reference environment) |
 
+| 2026-10-29 | GitHub Actions, ubuntu-latest | 1.11, 1 (rootless); 1 (native) | conda-forge 6.40 | all 3 CI jobs passed (before the bent/multi-error, TF2/TF3, polygon, and nested-layout additions) |
+
 Other combinations within Julia 1.11+ / ROOT 6.40+ are supported targets but are
-not claimed as validated until they appear in this table. The GitHub Actions
-workflow in `.github/workflows/ci.yml` has not yet been run remotely.
+not claimed as validated until they appear in this table. The workflow is
+`.github/workflows/ci.yml`.
+
+The graph-extension tests (`test/graph_feature_tests.jl`) cover input
+validation without ROOT and, with ROOT, native rendering of every new display
+mode, a pixel check that a non-convex polygon is not filled like its convex hull,
+malformed-request rejection by the native bridge, and the default absence of
+`Info in <TCanvas::Print>` messages (and their return with
+`ROOTPLOTS_ROOT_VERBOSE=1`).

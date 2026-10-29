@@ -1,5 +1,34 @@
 # Installation and runtime
 
+## Install the package
+
+ROOTPlots is not registered in the Julia General registry. Install it directly
+from GitHub into the environment you analyse in:
+
+```julia
+using Pkg
+Pkg.add(url="https://github.com/Kim-WooJong/ROOTPlots.jl")   # optionally: rev="<tag or commit>"
+using ROOTPlots
+build_root()        # compiles the two native bridges; also happens on first use
+```
+
+`Pkg.add("ROOTPlots")` without the URL does not work because the package is not
+in General. The CSV/DataFrames dependencies are installed automatically; ROOT
+itself and a C++ compiler must be installed separately (below).
+
+For development, or to run the repository's examples and tests, use a source
+checkout instead:
+
+```sh
+git clone https://github.com/Kim-WooJong/ROOTPlots.jl
+cd ROOTPlots.jl
+julia --project=. -e 'using Pkg; Pkg.instantiate()'
+julia --project=. scripts/doctor.jl
+```
+
+A separate analysis environment can track that checkout with
+`Pkg.develop(path="/absolute/path/to/ROOTPlots.jl")`.
+
 ## Choose an existing ROOT installation
 
 ROOTPlots builds two small C++ executables against your ROOT installation; it
@@ -11,8 +40,7 @@ julia --version
 root-config --version
 root-config --cflags --libs
 c++ --version
-julia --project=. -e 'using Pkg; Pkg.instantiate()'
-julia --project=. scripts/doctor.jl
+julia --project=. scripts/doctor.jl   # from a source checkout
 ```
 
 `doctor.jl` checks discovery, compilation/linking, an actual native fit, and PNG/PDF
@@ -53,6 +81,16 @@ Use `force=true` after replacing an SDK/compiler or ROOT in place without
 changing its path/version. Individual old build keys are not automatically
 evicted by ROOTPlots. Scratch/Pkg manage the cache lifecycle; do not delete
 artifacts while jobs are running. No source cleanup is needed after building.
+
+## ROOT messages
+
+The native processes lower ROOT's message level to *warning*, so routine
+`Info in <TCanvas::Print>: ... has been created` lines are not printed for
+every saved file. ROOT warnings and errors are still shown. Set the environment
+variable `ROOTPLOTS_ROOT_VERBOSE=1` (in the shell, or in Julia with
+`withenv("ROOTPLOTS_ROOT_VERBOSE" => "1") do ... end`) to restore ROOT's
+default verbosity when diagnosing problems. Like other `ENV` changes, do not
+toggle it while parallel jobs are running.
 
 ## macOS
 

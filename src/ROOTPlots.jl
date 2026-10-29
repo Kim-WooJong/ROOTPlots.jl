@@ -17,7 +17,9 @@ export Hist1D, Component, BinErrors, PanelSpec, PlotStyle, comparison,
        HistStack, Profile1D, Profile2D, Profile3D, PolygonHist2D, profile_stats,
        ModelCurve, function_curve, Graph3DErrors, PlotPanel, PlotFigure,
        PlotPrimitive, PlotArrow, PlotBox, PlotEllipse, SecondaryAxis,
-       PolarGraph, QQGraph, SplineCurve, PieChart, EfficiencyGraph, spline_points, efficiency_points, qq_points
+       PolarGraph, QQGraph, SplineCurve, PieChart, EfficiencyGraph, spline_points, efficiency_points, qq_points,
+       BentErrorSeries, MultiErrorSeries, YErrorSet, total_yerrors,
+       ModelSurface, ModelVolume, function_grid, PlotPolygon
 
 include("histograms.jl")
 include("histogramnd.jl")
@@ -31,6 +33,8 @@ include("statistics.jl")
 include("histdraw.jl")
 include("graphnd.jl")
 include("functionplots.jl")
+include("errorgraphs.jl")
+include("analytic.jl")
 include("advanced_histograms.jl")
 include("primitives.jl")
 include("specialgraphs.jl")

@@ -27,8 +27,10 @@ using ROOTPlots: HistStack, Profile1D, Profile2D, Profile3D, PolygonHist2D, prof
     @test poly.polygons[1][1,1]==0.
     @test_throws ArgumentError PolygonHist2D([[0. 0.;1. 1.;0. 1.;1. 0.]],[1.])
     @test_throws ArgumentError PolygonHist2D([[0. 0.;1. 0.;2. 0.]],[1.])
-    @test_throws ArgumentError PolygonHist2D([[0. 0.;1. 0.;.2 .2;0. 1.]],[1.])
-    @test_throws ArgumentError PolygonHist2D([[0. 0.;1. 0.;0. 1.;0. 0.]],[1.])
+    # Simple non-convex polygons are accepted; a repeated closing vertex is dropped.
+    @test PolygonHist2D([[0. 0.;1. 0.;.2 .2;0. 1.]],[1.]).polygons[1]==[0. 0.;1. 0.;.2 .2;0. 1.]
+    @test PolygonHist2D([[0. 0.;1. 0.;0. 1.;0. 0.]],[1.]).polygons[1]==[0. 0.;1. 0.;0. 1.]
+    @test_throws ArgumentError PolygonHist2D([[0. 0.;1. 0.;1. 0.;0. 1.]],[1.])
     mktempdir() do dir
         missing=joinpath(dir,"not-created","plot")
         @test_throws ArgumentError render_root(signed,GraphSpec(),missing;draw="HIST",root_config="/not-root")

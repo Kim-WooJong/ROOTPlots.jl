@@ -14,24 +14,27 @@ computations. ROOTPlots is not a complete ROOT API binding.
 | Heatmaps, contours, LEGO, surfaces, volumes | `Grid2D/3D`, `Graph2DSpec/Graph3DSpec` | TH2D/TH3D painters |
 | Stacked / unstacked histograms | `HistStack` | THStack; data/model comparison panels |
 | 1D/2D/3D profiles | `Profile1D/2D/3D`, `profile_stats` | TProfile/TProfile2D/TProfile3D filled natively |
-| Polygon bins | `PolygonHist2D` | TH2Poly (convex polygons without holes) |
+| Polygon bins | `PolygonHist2D` | TH2Poly (simple convex or non-convex polygons, no holes) |
 | XY points, lines, curves, fills, bars | `GraphSeries`, `GraphStyle` | TGraph and native draw options |
 | Symmetric/asymmetric errors, bands, boxes, arrows | `GraphSeries(...; xerrors, yerrors, errors)` | TGraphErrors/TGraphAsymmErrors |
+| Bent (shifted) error bars | `BentErrorSeries` | TGraphBentErrors |
+| Several y-error sets per point (e.g. stat + syst) | `MultiErrorSeries`, `YErrorSet`, `total_yerrors` | TGraphMultiErrors |
 | XYZ points/lines, errors, explicit interpolation | `Graph3D`, `Graph3DErrors` | TGraph2D/TGraph2DErrors |
 | Sampled Julia functions / native TF1 | `function_curve` / `ModelCurve` | Sampled TGraph / TF1 of a predefined model |
+| Native TF2 / TF3, sampled Julia functions of 2–3 variables | `ModelSurface` / `ModelVolume` / `function_grid` | TF2, TF3 of predefined models; sampled TH2D/TH3D |
 | Polar, QQ, spline | `PolarGraph`, `QQGraph`, `SplineCurve` | TGraphPolar, TGraphQQ, TSpline3/5 |
 | Pie charts, binomial efficiency | `PieChart`, `EfficiencyGraph` | TPie, TEfficiency with native intervals |
 | Lines, LaTeX text, legends, axes, margins | `PlotLine`, `PlotText`, `LegendSpec`, `AxisStyle`, `CanvasStyle` | TLine/TLatex/TLegend/ROOT axes |
-| Arrows, boxes, ellipses, secondary axes | `PlotArrow`, `PlotBox`, `PlotEllipse`, `SecondaryAxis` | TArrow/TBox/TEllipse/TGaxis |
-| Mixed multi-panel figures, vector PDF | `PlotPanel`, `PlotFigure` | One TCanvas with TPads (not stitched PNGs) |
+| Arrows, boxes, ellipses, polygons, secondary axes | `PlotArrow`, `PlotBox`, `PlotEllipse`, `PlotPolygon`, `SecondaryAxis` | TArrow/TBox/TEllipse/TPolyLine/TGaxis |
+| Mixed and nested multi-panel figures, vector PDF | `PlotPanel`, `PlotFigure` | One TCanvas with (nested) TPads (not stitched PNGs) |
 | Parallel work | `rootmap`; `histogram(...; threads=...)` | Julia tasks/CPU threads + isolated ROOT processes |
 
 Out of scope or not implemented: ROOT file I/O, RDataFrame, GUI/OpenGL,
-RooFit/RooStats, arbitrary C++ or TF1 expression strings, arbitrary analytic
-TF2/TF3, TGraphBentErrors/TGraphMultiErrors, non-convex or holed TH2Poly bins,
-arbitrary nested pads, and geometry/event displays. Not every axis detail of
-polar/XYZ plots and not every ROOT class method is exposed. A Julia function can
-be sampled and overlaid, but that is not described as the corresponding special
+RooFit/RooStats, arbitrary C++ or TF1/TF2/TF3 expression strings (analytic
+functions come from fixed named formulas), OpenGL-only TF3/TH3 views, polygons
+with holes, and geometry/event displays. Not every axis detail of polar/XYZ
+plots and not every ROOT class method is exposed. A Julia function can be
+sampled and overlaid, but that is not described as the corresponding special
 ROOT object.
 
 The supported target is ROOT 6.40 or newer; no compatibility layer for older
@@ -71,7 +74,8 @@ are computed with ROOT's `Fill`. `error=:mean|:spread|:integer|:gaussian` is
 supported with finite non-negative weights; Gaussian mode requires positive
 weights. A true stack requires identical binning and non-negative contents;
 signed bins are only accepted with `draw="NOSTACK HIST"`. `PolygonHist2D`
-displays pre-aggregated values for convex polygons and does not fill events.
+displays pre-aggregated values for simple polygons (convex or not; see
+[polygons](#non-convex-polygons)) and does not fill events.
 
 ### Mixed panels and annotations
 
@@ -91,19 +95,42 @@ render_root(figure, "output/figure"; format=:both)
 ```
 
 Panels are row-major; `PlotFigure([p11 p12; p21 p22])` is also accepted. XY
-panels may mix `Hist1D`, `GraphSeries`, and `ModelCurve` layers; ND panels
+panels may mix `Hist1D`, `GraphSeries`, `BentErrorSeries`, `MultiErrorSeries`, and
+`ModelCurve` layers; ND panels
 draw one ND object. The `PlotPanel` keywords `xaxis/yaxis/zaxis`,
 `xlimits/ylimits/zlimits`, `canvas`, `lines/texts/legend_spec`,
 `style/styles`, and `label/labels` apply to basic XY/ND panels. Advanced,
-ModelCurve, XYZ, and special objects use their own spec and style; common
+ModelCurve, TF2/TF3, XYZ, and special objects use their own spec and style; common
 `primitives` may be added to any panel. Because a basic XY panel owns its axes,
 use standalone `render_root` for special TH1 options such as HBAR/PIE/FUNC/AXIS.
 
 Palettes and error-cap/PostScript line scale are ROOT global settings, so
 conflicting values within one figure are rejected; ND panels must share a
-palette. Nested layouts and automatic shared axes are not provided. For grid
-panels, `zlimits` is the color range for TH2 and the spatial z range for TH3.
-Arrow/Box/Ellipse/SecondaryAxis use data coordinates; a secondary axis is a
+palette (this includes panels in nested sub-grids). Automatic shared axes are
+not provided. For grid panels, `zlimits` is the color range for TH2 and the
+spatial z range for TH3.
+
+#### Nested layouts
+
+A cell of a `PlotFigure` may itself be a `PlotFigure`; it is drawn as a
+sub-grid inside that cell (ROOT `TPad::Divide` of the cell's pad, i.e. genuinely
+nested TPads). `widths`/`heights` give relative column/row weights.
+
+```julia
+right = PlotFigure([PlotPanel(two.hist, Graph2DSpec(title="TH2")),
+                    PlotPanel(profile, GraphSpec(title="TProfile"))]; layout=(2, 1), heights=[1, 2])
+figure = PlotFigure([PlotPanel([g, model], GraphSpec()), right];
+                    layout=(1, 2), widths=[3, 2], size=(1300, 700))
+render_root(figure, "output/nested")
+```
+
+Figures nest at most 4 levels deep and hold at most 64 panels in total, with
+1:16 rows/columns per grid and weight ratios up to 100. Only the outermost
+figure's `size` is used. Without `widths`/`heights` and nested cells, the
+native request is identical to the previous flat layout. ROOT text and marker
+sizes are fractions of the pad, so labels in small sub-pads become small;
+enlarge them with `AxisStyle`/`PlotText` sizes if needed.
+Arrow/Box/Ellipse/Polygon/SecondaryAxis use data coordinates; a secondary axis is a
 linear numeric mapping and does not transform data.
 
 ### Functions and special graphs
@@ -134,10 +161,115 @@ integer `passed <= total` with Clopper–Pearson intervals (configurable
 `confidence`); bins with zero denominator are omitted. `PieChart(values; labels,
 colors)` is a native TPie.
 
+### Bent and multiple error bars
+
+```julia
+x = collect(1.:6.)
+a = BentErrorSeries(x, ya; yerrors=(low=fill(.45, 6), high=fill(.35, 6)), ybend=fill(-.18, 6), label="A")
+b = BentErrorSeries(x, yb; yerrors=fill(.4, 6), ybend=fill(.18, 6), label="B")
+render_root([a, b], GraphSpec(xlabel="x", ylabel="y"), "output/bent")
+
+stat = YErrorSet(fill(.25, 6); label="Statistical")
+syst = YErrorSet((low=sl, high=sh); label="Systematic", display=:boxes, xscale=.6,
+                 style=GraphStyle(color="#4477aa", fill_alpha=.45))
+data = MultiErrorSeries(x, ya, [stat, syst]; xerrors=fill(.3, 6), label="Data", sum=:quadrature)
+render_root(data, GraphSpec(xlabel="x", ylabel="y"), "output/stat-syst")
+combined = total_yerrors(data)   # (low=…, high=…) with the selected sum rule
+```
+
+`BentErrorSeries` is a native `TGraphBentErrors`: the error magnitudes are as for
+`GraphSeries`, and `ybend`/`xbend` move the error-bar **end points** (in axis
+units) without moving the point: the lower y bar ends at `(x + ybend.low, y - eylow)`,
+the left x bar at `(x - exlow, y + xbend.low)`. Use it to separate overlapping
+bars; the bend is display geometry only. `errors` accepts the `GraphSeries` modes.
+
+`MultiErrorSeries` is a native `TGraphMultiErrors` with 1:16 y-error sets
+(`YErrorSet`), each drawn separately from the point with its own line/fill style
+and `display` (`:bars`, `:nocaps`, `:caps`, `:arrows`, `:filledarrows`, `:boxes`,
+`:boxes_outline`, `:band`, `:smoothband`, `:none`). Box widths are the x
+errors times `xscale`. Labelled sets get their own legend entries after the
+regular layers (explicit `LegendEntry(:series, i, …)` indices are unchanged).
+`sum=:first|:quadrature|:linear` is ROOT's `SetSumErrorsMode`
+(`kOnlyFirst/kSquareSum/kAbsSum`); it does not change how the sets are drawn and
+is reproduced by `total_yerrors`. Whether a quadrature sum is justified
+(independent sources) is the caller's decision. Neither type is a fit input;
+fit a `GraphSeries` built with the chosen combined errors instead.
+
+Both types work as standalone figures, in a vector of mixed XY layers
+(`render_root([graph, bent, multi, model], spec, stem)` draws them on one pad),
+and in `PlotPanel`. Frame ranges include all drawn end points (bent offsets,
+the widest visible error set); on log axes these end points must be positive.
+
+### Analytic TF2/TF3 and sampled Julia functions
+
+Like `ModelCurve` (TF1), the 2-D/3-D analytic objects are genuine ROOT functions
+built from a **fixed list of named formulas** defined on both the Julia and C++
+side; no user expression string reaches TFormula/Cling. Arbitrary Julia code
+is supported by sampling instead.
+
+```julia
+surface = ModelSurface(:bigaus, [1., 0., 1., 0., .7, .5]; xrange=(-3, 3), yrange=(-3, 3), npx=100, npy=100)
+render_root(surface, Graph3DSpec(draw="SURF1"), "output/tf2-surface")
+render_root(surface, Graph2DSpec(draw="CONT1Z", contours=12), "output/tf2-contours")
+render_root(surface, Graph2DSpec(draw=:heatmap), "output/tf2-colz")
+
+volume = ModelVolume(:gaus3d, [1., 0., 1., 0., .7, 0., 1.3];
+                     xrange=(-3, 3), yrange=(-3, 3), zrange=(-3, 3), level=.3)
+render_root(volume, Graph3DSpec(draw=:iso), "output/tf3-iso")   # surface f = 0.3
+render_root(volume, Graph3DSpec(draw=:box), "output/tf3-box")   # sampled TH3D, f > 0.3
+
+grid = function_grid((x, y) -> sin(x) * cos(y), (0, pi), (0, pi); n=(100, 100))  # Grid2D
+```
+
+| Model | Parameters (1-based) |
+|---|---|
+| `:gaus2d` | `[A, mx, sx, my, sy]`: `A exp(-((x-mx)/sx)²/2 - ((y-my)/sy)²/2)` |
+| `:bigaus` | `[A, mx, sx, my, sy, rho]`, correlated Gaussian, `abs(rho) < 1` |
+| `:pol1_2d` / `:pol2_2d` | `[p0, px, py]` / `[p0, px, py, pxx, pxy, pyy]` |
+| `:gaus3d` | `[A, mx, sx, my, sy, mz, sz]` |
+| `:pol1_3d` / `:pol2_3d` | `[p0, px, py, pz]` / `[p0, px, py, pz, pxx, pyy, pzz, pxy, pxz, pyz]` |
+
+`ModelSurface` (TF2) accepts `Graph2DSpec` (`:heatmap` → `COLZ`, `:contour` →
+`CONT3`, or `COL[0-2][Z]`, `CONT[0-4][Z]`) and `Graph3DSpec` (`:surface` →
+`SURF2Z`, or `SURF[1-7][Z]`, `LEGO[1-4][Z]`); log axes need positive ranges
+(and positive values for `logz`). ROOT paints a TF2 by evaluating it on an
+`npx × npy` grid, so contours and surfaces are grid renderings of the exact
+function. `ModelVolume` (TF3) offers only what ROOT draws in batch mode
+without OpenGL: `:iso`, ROOT's implicit-surface painter for `f(x, y, z) = level`,
+and `:box`, the TF3 evaluated natively at the centres of an `npx × npy × npz`
+TH3D drawn as `BOX2Z` with bins `f ≤ level` hidden. GL options, transparent
+volume rendering, slices/projections of TF3, log axes for TF3, and fitting with
+TF2/TF3 are not provided.
+
+`function_grid(f, xrange, yrange; n)` / `function_grid(f, xrange, yrange, zrange; n)`
+evaluate a Julia callable at the cell centres and return a `Grid2D`/`Grid3D`
+(TH2D/TH3D), the grid analogue of `function_curve`. All `Grid2D`/`Grid3D`
+options apply; this is a display-only sampling, not a TF2/TF3.
+
+### Non-convex polygons
+
+`PolygonHist2D` bins and the `PlotPolygon` primitive accept any **simple**
+polygon, convex or not (L shapes, stars, U shapes):
+
+```julia
+L = ([0., 2, 2, 1, 1, 0], [0., 0, 1, 1, 3, 3])
+cells = PolygonHist2D([L, star], [1., 3.])
+render_root(cells, Graph2DSpec(), "output/polygons")
+panel = PlotPanel([graph], GraphSpec(); primitives=[PlotPolygon(L...; fill_color="#cc6677", fill_alpha=.5)])
+```
+
+Each polygon needs 3:256 finite vertices (a repeated closing vertex is
+removed), no repeated neighbours, a non-zero area, and no self-intersection:
+non-adjacent edges may not touch or cross and an edge may not fold back onto
+its neighbour. Violations raise `ArgumentError` naming the problem, and the
+native bridge repeats the check. Holes (polygons with inner rings) and
+multi-part bins are not supported. `PlotPolygon` is drawn as a filled
+`TPolyLine` plus outline in data coordinates; `fill_style=0` draws the outline only.
+
 Runnable examples: `scripts/graphics_gallery.jl` (9 panels),
 `scripts/special_graph_demo.jl` (6 panels), `scripts/advanced_histogram_demo.jl`,
-`scripts/graph_extension_demo.jl`, `scripts/edge_profile_demo.jl`. All inputs
-are synthetic.
+`scripts/graph_extension_demo.jl` (bent/multi errors, TF2/TF3, polygons, nested
+pads), `scripts/edge_profile_demo.jl`. All inputs are synthetic.
 
 ## Parallel ROOT jobs
 
@@ -537,7 +669,8 @@ is explicit scattered-point interpolation. Log axes for XYZ points are not yet
 supported. 3D grid surfaces need at least two cells per axis, and XYZ data need at
 least two distinct x and y values. Use `PlotPanel/PlotFigure` for ND axis styles,
 ranges, color ranges, explicit contour levels, and multiple pads. 2D/3D fitting
-and arbitrary analytic TF2/TF3 are not implemented.
+is not implemented; analytic TF2/TF3 drawing is described under
+[Analytic TF2/TF3](#analytic-tf2tf3-and-sampled-julia-functions).
 
 ## Comparison-panel style and log axes
 
@@ -575,3 +708,9 @@ Paths and values are passed as argument arrays and an explicit text protocol,
 never evaluated as ROOT macros. No `.root` files are created. ROOT's `TLatex`
 interprets `#`, `_`, and `^`; `μ` and `ℓ` are converted to `#mu` and `#ell`. Pixel
 identity across Unicode text, fonts, or operating systems is not guaranteed.
+
+**ROOT messages.** Each native process sets ROOT's `gErrorIgnoreLevel` to
+`kWarning`, so routine `Info in <TCanvas::Print>: ... has been created` lines
+are not printed, while ROOT warnings and errors still reach stderr. With the
+environment variable `ROOTPLOTS_ROOT_VERBOSE=1` the processes keep ROOT's
+default message level (e.g. `withenv("ROOTPLOTS_ROOT_VERBOSE" => "1") do ... end`).

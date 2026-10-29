@@ -6,6 +6,11 @@
 #include <TGraph.h>
 #include <TGraphErrors.h>
 #include <TGraphAsymmErrors.h>
+#include <TGraphBentErrors.h>
+#include <TGraphMultiErrors.h>
+#include <TF2.h>
+#include <TF3.h>
+#include <TPolyLine.h>
 #include <TGraph2D.h>
 #include <TGraph2DErrors.h>
 #include <TH1D.h>
@@ -34,6 +39,7 @@
 #include <TPie.h>
 #include <TEfficiency.h>
 #include <TImage.h>
+#include <TError.h>
 
 
 #include <algorithm>
@@ -1395,17 +1401,27 @@ void draw_xyz(const std::vector<std::vector<std::string>> &rows, const std::stri
   auto objects=paint_xyz(rows,canvas);
   save(canvas,stem);
 }
+#include "polygons.hpp"
 #include "advanced_histograms.hpp"
 #include "primitives.hpp"
 #include "specialgraphs.hpp"
+#include "errorgraphs.hpp"
+#include "analytic.hpp"
 #include "layouts.hpp"
 }
 // Compare two images with ROOT's own image reader (used by visual regression tests).
 // Prints "SIZE w1 h1 w2 h2" for different dimensions, otherwise
 // "DIFF width height max_channel_diff mean_channel_diff changed_pixels" where a
 // pixel counts as changed when any RGB channel differs by more than 32/255.
+// ROOT prints an Info message for every saved file. Show warnings and errors
+// only, unless ROOTPLOTS_ROOT_VERBOSE=1 restores ROOT's default message level.
+void quiet_root() {
+  const char *verbose=std::getenv("ROOTPLOTS_ROOT_VERBOSE");
+  if(!(verbose && std::string(verbose)=="1")) gErrorIgnoreLevel=kWarning;
+}
 int image_diff(const char *left,const char *right) {
   gROOT->SetBatch(kTRUE);
+  quiet_root();
   std::unique_ptr<TImage> a(TImage::Open(left)), b(TImage::Open(right));
   check(a && b && a->IsValid() && b->IsValid(),"cannot read image");
   const unsigned w=a->GetWidth(), h=a->GetHeight();
@@ -1434,6 +1450,7 @@ int main(int argc,char **argv) {
     if(argc==4 && std::string(argv[1])=="--image-diff") return image_diff(argv[2],argv[3]);
     check(argc==3,"usage: rootplots-graphfit input.tsv output | --image-diff a.png b.png");
     gROOT->SetBatch(kTRUE);
+    quiet_root();
     gStyle->SetOptStat(0); gStyle->SetOptFit(0); gStyle->SetOptTitle(0);
     auto rows=read_input(argv[1]);
     if(rows[0][0]=="DRAW") draw(rows,argv[2]);

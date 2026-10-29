@@ -11,6 +11,7 @@ include("graph_extension_tests.jl")
 include("advanced_histogram_tests.jl")
 include("layout_tests.jl")
 include("special_graph_tests.jl")
+include("graph_feature_tests.jl")
 include("visual_tests.jl")
 
 @testset "DataFrame histogram: ROOT edges, signed weights, flow bins" begin

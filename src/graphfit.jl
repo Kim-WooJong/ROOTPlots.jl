@@ -273,10 +273,9 @@ end
 function graphfit_executable(config::AbstractString; force::Bool=false)
     source = normpath(joinpath(@__DIR__, "..", "backend", "root", "graphfit.cpp"))
     return compile_root_backend(config, source, "rootplots-graphfit", "-std=c++20";
-                                force, dependencies=[joinpath(dirname(source), "advanced_histograms.hpp"),
-                                                     joinpath(dirname(source), "layouts.hpp"),
-                                                     joinpath(dirname(source), "primitives.hpp"),
-                                                     joinpath(dirname(source), "specialgraphs.hpp")])
+                                force, dependencies=[joinpath(dirname(source), header) for header in
+                                    ("advanced_histograms.hpp", "analytic.hpp", "errorgraphs.hpp", "layouts.hpp",
+                                     "polygons.hpp", "primitives.hpp", "specialgraphs.hpp")])
 end
 
 function write_graph_series(io, series)

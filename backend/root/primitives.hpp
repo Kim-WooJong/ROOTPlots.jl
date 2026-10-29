@@ -33,6 +33,23 @@ std::vector<std::unique_ptr<TObject>> paint_primitives(const std::vector<std::ve
       for(char c:f[11]) check(std::string("+-LURSMWN=><").find(c)!=std::string::npos,"unsupported secondary axis option");
       auto axis=std::make_unique<TGaxis>(x1,y1,x2,y2,low,high,divisions,f[11].c_str());
       style_line(*axis,f[10],1); axis->SetLabelColor(TColor::GetColor(f[10].c_str())); axis->SetTitle(f[9].c_str()); axis->Draw(); object=std::move(axis);
+    } else if(f[1]=="POLYGON") {
+      check(f.size()>=8,"invalid POLYGON");
+      int n=integer(f[2]);
+      check(n>=3 && n<=256 && f.size()==static_cast<size_t>(8+2*n),"invalid POLYGON vertex count");
+      std::vector<double> x,y;
+      for(int i=0;i<n;++i) { x.push_back(real(f[8+2*i])); y.push_back(real(f[9+2*i])); coordinate(x.back(),y.back()); }
+      check_simple_polygon(x,y);
+      x.push_back(x.front()); y.push_back(y.front());
+      int fill_style=integer(f[6]);
+      if(fill_style!=0) {
+        auto area=std::make_unique<TPolyLine>(n+1,x.data(),y.data());
+        style_fill(*area,f[5],fill_style,real(f[7])); area->SetLineWidth(0); area->Draw("f");
+        objects.push_back(std::move(area));
+      } else { color(f[5]); check(real(f[7])>=0 && real(f[7])<=1,"invalid primitive fill"); }
+      auto outline=std::make_unique<TPolyLine>(n+1,x.data(),y.data());
+      style_line(*outline,f[3],integer(f[4])); outline->Draw();
+      object=std::move(outline);
     } else throw std::runtime_error("unknown primitive kind");
     objects.push_back(std::move(object));
   }

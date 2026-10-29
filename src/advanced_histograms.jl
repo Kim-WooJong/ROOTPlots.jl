@@ -143,10 +143,13 @@ function validate_profile(p::AbstractRootProfile)
     return p
 end
 
-"""Owned pre-binned TH2Poly cells. Each polygon is a convex N×2 matrix or (x,y) vectors.
+"""Owned pre-binned TH2Poly cells. Each polygon is an N×2 matrix or (x,y) vectors.
 
-Only finite convex polygons without holes are accepted. Bins may overlap; ROOT
-paints them in input order. No event-filling/overlap assignment is performed.
+Any simple polygon (convex or non-convex, e.g. L-shaped or star-shaped) without
+holes is accepted; see `simple_polygon` for the vertex checks (3:256 finite
+vertices, non-zero area, no self-intersection; a repeated closing vertex is
+dropped). Bins may overlap; ROOT paints them in input order. No
+event-filling/overlap assignment is performed.
 """
 struct PolygonHist2D
     polygons::Vector{Matrix{Float64}}
@@ -155,9 +158,12 @@ struct PolygonHist2D
         owned=Matrix{Float64}[]
         for polygon in polygons
             if polygon isa AbstractMatrix
-                push!(owned,Matrix{Float64}(polygon))
+                size(polygon,2)==2 || throw(ArgumentError("polygon matrix must be N×2"))
+                xx,yy=simple_polygon(polygon[:,1],polygon[:,2])
+                push!(owned,hcat(xx,yy))
             elseif polygon isa Tuple && length(polygon)==2
-                push!(owned,hcat(Float64.(polygon[1]),Float64.(polygon[2])))
+                xx,yy=simple_polygon(polygon[1],polygon[2])
+                push!(owned,hcat(xx,yy))
             else
                 throw(ArgumentError("polygon must be an N×2 matrix or (x,y) vectors"))
             end
@@ -173,22 +179,10 @@ function validate_poly(p::PolygonHist2D)
         throw(ArgumentError("polygon histogram needs 1:10000 finite cell values"))
     sum(size(v,1) for v in p.polygons)<=100_000 || throw(ArgumentError("too many polygon vertices"))
     for v in p.polygons
+        size(v,2)==2 || throw(ArgumentError("polygon needs N×2 xy vertices"))
         n=size(v,1)
-        size(v,2)==2 && 3<=n<=256 && all(isfinite,v) || throw(ArgumentError("polygon needs 3:256 finite xy vertices"))
-        sign=0
-        for i in 1:n
-            j=mod1(i+1,n)
-            (v[i,1]!=v[j,1] || v[i,2]!=v[j,2]) || throw(ArgumentError("duplicate neighboring polygon vertices"))
-            for k in 1:n
-                cross=(v[j,1]-v[i,1])*(v[k,2]-v[i,2])-(v[j,2]-v[i,2])*(v[k,1]-v[i,1])
-                isfinite(cross) || throw(ArgumentError("polygon geometry overflows"))
-                cross==0 && continue
-                direction=cross>0 ? 1 : -1
-                sign==0 && (sign=direction)
-                direction==sign || throw(ArgumentError("polygon must be convex and ordered without intersections"))
-            end
-        end
-        sign!=0 || throw(ArgumentError("polygon has zero area"))
+        # Stored polygons already had any closing duplicate removed; a changed count means mutation.
+        length(first(simple_polygon(v[:,1],v[:,2])))==n || throw(ArgumentError("polygon vertices changed"))
     end
     return p
 end

@@ -1,4 +1,4 @@
-"""Resolve a local `root-config` executable from an explicit path, ROOT_CONFIG, ROOTSYS, or PATH; return `nothing` when absent without contacting gate."""
+"""Resolve a local `root-config` executable from an explicit path, ROOT_CONFIG, ROOTSYS, or PATH; return `nothing` when absent without contacting any remote host."""
 function find_root_config(explicit::Union{Nothing,AbstractString}=nothing)
     # A deliberately selected installation must not silently fall back to another.
     if explicit !== nothing || haskey(ENV, "ROOT_CONFIG")

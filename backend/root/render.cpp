@@ -10,7 +10,7 @@
 #include <TPad.h>
 #include <TROOT.h>
 #include <TStyle.h>
-
+#include <TError.h>
 
 #include <algorithm>
 #include <cctype>
@@ -361,12 +361,19 @@ void draw_panel(const Panel &p, int col, int count, const Figure &figure,
     d.clipped_errors.push_back(std::move(line));
   }
 }
+// ROOT prints an Info message for every saved file. Show warnings and errors
+// only, unless ROOTPLOTS_ROOT_VERBOSE=1 restores ROOT's default message level.
+void quiet_root() {
+  const char *verbose = std::getenv("ROOTPLOTS_ROOT_VERBOSE");
+  if (!(verbose && std::string(verbose) == "1")) gErrorIgnoreLevel = kWarning;
+}
 } // namespace
 
 int main(int argc, char **argv) {
   try {
     check(argc == 3, "usage: rootplots-render spec.tsv output-stem");
     gROOT->SetBatch(kTRUE);
+    quiet_root();
     gStyle->SetOptStat(0); gStyle->SetOptTitle(0);
     gStyle->SetEndErrorSize(4); gStyle->SetErrorX(0);
     auto figure = parse(argv[1]);

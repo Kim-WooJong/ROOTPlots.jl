@@ -53,6 +53,7 @@ LayoutDrawing paint_layout_basic(const std::vector<std::vector<std::string>>& ro
   std::vector<std::string> object_labels,legend_options;
   TH1 *frame=nullptr;
   if(dimension==1) frame=pad.DrawFrame(xmin,ymin,xmax,ymax);
+  std::vector<ErrorLayer::Extra> extra_entries;
   for(int layer=0;layer<nlayers;++layer) {
     check(at<rows.size() && rows[at].size()>=3 && rows[at][0]=="LAYER","missing panel layer");
     auto item=rows[at++];
@@ -72,6 +73,14 @@ LayoutDrawing paint_layout_basic(const std::vector<std::vector<std::string>>& ro
       curve->SetNpx(npx); curve->SetLineColor(TColor::GetColor(f[7].c_str())); curve->SetLineWidth(width); curve->SetLineStyle(line);
       curve->Draw("SAME"); objects.push_back(curve.get()); object_labels.push_back(item[2]); legend_options.push_back("l");
       result.objects.push_back(std::move(curve)); continue;
+    }
+    if(item[1]=="BENT" || item[1]=="MULTI") {
+      check(dimension==1 && item.size()==3,"invalid error-graph layer");
+      auto layer=item[1]=="BENT" ? paint_bent_layer(rows,at,logx,logy) : paint_multi_layer(rows,at,logx,logy);
+      objects.push_back(layer.primary); object_labels.push_back(layer.label); legend_options.push_back(layer.option);
+      for(const auto &e:layer.extra) extra_entries.push_back(e);
+      for(auto &o:layer.owned) result.objects.push_back(std::move(o));
+      continue;
     }
     if(item[1]=="GRAPH") {
       check(dimension==1 && item.size()==3,"invalid graph layer");
@@ -149,6 +158,8 @@ LayoutDrawing paint_layout_basic(const std::vector<std::vector<std::string>>& ro
   check(frame!=nullptr,"missing panel frame");
   frame->GetXaxis()->SetTitle(labels.x.c_str()); frame->GetYaxis()->SetTitle(labels.y.c_str());
   frame->GetZaxis()->SetTitle(labels.z.c_str()); apply_axes(frame,scene); apply_axis(frame->GetZaxis(),zaxis);
+  // Per-error-set legend proxies follow all layers so explicit :series indices are unchanged.
+  for(const auto &e:extra_entries) { objects.push_back(e.object); object_labels.push_back(e.label); legend_options.push_back(e.option); }
   result.decorations=draw_scene(scene,corner,objects,object_labels,legend_options);
   if(!labels.title.empty()) {
     auto title=std::make_unique<TLatex>(0.13,0.94,labels.title.c_str());
@@ -157,48 +168,92 @@ LayoutDrawing paint_layout_basic(const std::vector<std::vector<std::string>>& ro
   return result;
 }
 
+struct LayoutState {
+  std::vector<LayoutDrawing> basics;
+  std::vector<AdvancedDrawing> advanced;
+  std::vector<FunctionDrawing> functions;
+  std::vector<XYZDrawing> xyz;
+  std::vector<SpecialDrawing> special;
+  std::vector<AnalyticDrawing> analytic;
+  std::vector<std::vector<std::unique_ptr<TObject>>> primitives;
+  int leaves=0;
+  int base_frame_width=1;
+};
+void paint_layout_cell(const std::vector<std::vector<std::string>>& payload,
+                       const std::vector<std::vector<std::string>>& primitive_rows,TPad &pad,LayoutState &state) {
+  gStyle->SetFrameLineWidth(state.base_frame_width);
+  pad.cd();
+  check(!payload.empty() && !payload[0].empty(),"empty panel");
+  auto command=payload[0][0];
+  if(command=="PLOT") state.basics.push_back(paint_layout_basic(payload,pad));
+  else if(advanced_command(command)) state.advanced.push_back(paint_advanced(payload,pad));
+  else if(command=="DRAWFUNCTION") state.functions.push_back(paint_function(payload,pad));
+  else if(command=="DRAWXYZ") state.xyz.push_back(paint_xyz(payload,pad));
+  else if(command=="DRAWTF2") state.analytic.push_back(paint_tf2(payload,pad));
+  else if(command=="DRAWTF3") state.analytic.push_back(paint_tf3(payload,pad));
+  else if(special_command(command)) state.special.push_back(paint_special(payload,pad));
+  else throw std::runtime_error("unsupported layout panel command");
+  state.primitives.push_back(paint_primitives(primitive_rows,pad));
+  pad.Modified(); pad.Update();
+}
+// One grid level: Divide the parent pad (exactly as the original flat layout),
+// optionally resize the cells by relative weights, then paint each cell. A
+// SUBGRID cell is divided again, giving genuinely nested TPads.
+void paint_layout_grid(const std::vector<std::vector<std::string>>& rows,size_t &at,TPad &parent,
+                       int nr,int nc,int count,int depth,LayoutState &state) {
+  check(depth<=4 && nr>=1 && nr<=16 && nc>=1 && nc<=16 && count>=1 && count<=nr*nc && nr*nc<=64,
+        "invalid layout grid");
+  parent.cd();
+  parent.Divide(nc,nr,0.001,0.001);
+  if(at<rows.size() && !rows[at].empty() && rows[at][0]=="WEIGHTS") {
+    const auto &w=rows[at++];
+    check(w.size()==static_cast<size_t>(1+nc+nr),"invalid layout weights");
+    std::vector<double> cx{0},cy{0};
+    for(int i=0;i<nc;++i) { double v=real(w[1+i]); check(v>0,"layout weights must be positive"); cx.push_back(cx.back()+v); }
+    for(int i=0;i<nr;++i) { double v=real(w[1+nc+i]); check(v>0,"layout weights must be positive"); cy.push_back(cy.back()+v); }
+    const double margin=0.001;
+    for(int iy=0;iy<nr;++iy) for(int ix=0;ix<nc;++ix) {
+      auto *cell=dynamic_cast<TPad*>(parent.GetPad(iy*nc+ix+1)); check(cell!=nullptr,"missing layout pad");
+      double x1=cx[ix]/cx.back()+margin,x2=cx[ix+1]/cx.back()-margin;
+      double y2=1-cy[iy]/cy.back()-margin,y1=1-cy[iy+1]/cy.back()+margin;
+      cell->SetPad(x1,y1,x2,y2);
+    }
+  }
+  for(int i=1;i<=count;++i) {
+    check(at<rows.size() && rows[at].size()>=2,"missing layout cell");
+    auto *pad=dynamic_cast<TPad*>(parent.GetPad(i)); check(pad!=nullptr,"missing layout pad");
+    const auto &head=rows[at];
+    if(head[0]=="SUBGRID") {
+      check(head.size()==5 && integer(head[1])==i,"invalid SUBGRID");
+      int snr=integer(head[2]),snc=integer(head[3]),scount=integer(head[4]); ++at;
+      paint_layout_grid(rows,at,*pad,snr,snc,scount,depth+1,state);
+      check(at<rows.size() && rows[at].size()==2 && rows[at][0]=="ENDGRID" && integer(rows[at][1])==i,"invalid ENDGRID");
+      ++at;
+      continue;
+    }
+    check(head.size()==4 && head[0]=="PANEL" && integer(head[1])==i,"invalid PANEL");
+    int n=integer(head[2]),nprimitives=integer(head[3]); ++at;
+    check(n>0 && n<=5000000 && nprimitives>=0 && nprimitives<=1000 && static_cast<size_t>(n+nprimitives)<=rows.size()-at,"invalid panel record count");
+    check(++state.leaves<=64,"too many layout panels");
+    std::vector<std::vector<std::string>> payload(rows.begin()+at,rows.begin()+at+n); at+=n;
+    std::vector<std::vector<std::string>> primitive_rows(rows.begin()+at,rows.begin()+at+nprimitives); at+=nprimitives;
+    paint_layout_cell(payload,primitive_rows,*pad,state);
+  }
+}
+
 void draw_layout(const std::vector<std::vector<std::string>>& rows,const std::string &stem) {
   check(!rows.empty() && rows[0].size()==6 && rows[0][0]=="DRAWLAYOUT","invalid DRAWLAYOUT");
   auto header=rows[0];
   int width=integer(header[1]),height=integer(header[2]),nr=integer(header[3]),nc=integer(header[4]),count=integer(header[5]);
   check(width>=100 && width<=10000 && height>=100 && height<=10000 && nr>=1 && nr<=16 && nc>=1 && nc<=16 &&
         count>=1 && count<=64 && nr*nc>=count && nr*nc<=64,"invalid layout dimensions");
-  std::vector<std::vector<std::vector<std::string>>> panels;
-  std::vector<std::vector<std::vector<std::string>>> primitive_rows;
-  size_t at=1;
-  for(int i=1;i<=count;++i) {
-    check(at<rows.size() && rows[at].size()==4 && rows[at][0]=="PANEL" && integer(rows[at][1])==i,"invalid PANEL");
-    int n=integer(rows[at][2]),nprimitives=integer(rows[at++][3]);
-    check(n>0 && n<=5000000 && nprimitives>=0 && nprimitives<=1000 && static_cast<size_t>(n+nprimitives)<=rows.size()-at,"invalid panel record count");
-    panels.emplace_back(rows.begin()+at,rows.begin()+at+n); at+=n;
-    primitive_rows.emplace_back(rows.begin()+at,rows.begin()+at+nprimitives); at+=nprimitives;
-  }
-  check(at+1==rows.size() && rows[at].size()==2 && rows[at][0]=="END" && integer(rows[at][1])==count,"invalid layout END");
   // Native objects outlive all pads and final export; destroy canvas first.
-  std::vector<LayoutDrawing> basics;
-  std::vector<AdvancedDrawing> advanced;
-  std::vector<FunctionDrawing> functions;
-  std::vector<XYZDrawing> xyz;
-  std::vector<SpecialDrawing> special;
-  std::vector<std::vector<std::unique_ptr<TObject>>> primitives;
+  LayoutState state;
+  state.base_frame_width=gStyle->GetFrameLineWidth();
   TCanvas canvas("rootplots_layout","",width,height);
-  canvas.Divide(nc,nr,0.001,0.001);
-  const int base_frame_width=gStyle->GetFrameLineWidth();
-  for(int i=0;i<count;++i) {
-    gStyle->SetFrameLineWidth(base_frame_width);
-    auto *pad=dynamic_cast<TPad*>(canvas.cd(i+1)); check(pad!=nullptr,"missing layout pad");
-    const auto &payload=panels[i];
-    check(!payload.empty() && !payload[0].empty(),"empty panel");
-    auto command=payload[0][0];
-    if(command=="PLOT") basics.push_back(paint_layout_basic(payload,*pad));
-    else if(advanced_command(command)) advanced.push_back(paint_advanced(payload,*pad));
-    else if(command=="DRAWFUNCTION") functions.push_back(paint_function(payload,*pad));
-    else if(command=="DRAWXYZ") xyz.push_back(paint_xyz(payload,*pad));
-    else if(special_command(command)) special.push_back(paint_special(payload,*pad));
-    else throw std::runtime_error("unsupported layout panel command");
-    primitives.push_back(paint_primitives(primitive_rows[i],*pad));
-    pad->Modified(); pad->Update();
-  }
-  gStyle->SetFrameLineWidth(base_frame_width);
+  size_t at=1;
+  paint_layout_grid(rows,at,canvas,nr,nc,count,1,state);
+  check(at+1==rows.size() && rows[at].size()==2 && rows[at][0]=="END" && integer(rows[at][1])==count,"invalid layout END");
+  gStyle->SetFrameLineWidth(state.base_frame_width);
   canvas.cd(); save(canvas,stem);
 }
