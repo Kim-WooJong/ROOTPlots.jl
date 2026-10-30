@@ -348,6 +348,97 @@ void style_scaled_axis(TAxis *a,const char *which,TVirtualPad *pad,bool horizont
   }
 }
 
+// Two-pad layouts (fit/pull, comparison): absolute text sizes. A TAxis text
+// size is a fraction of the smaller pad dimension, or pixels for precision-3
+// fonts (font%10==3), so the same value gives different pixel sizes in pads of
+// different heights. TGaxis puts a y title 1.6*size*offset pad widths left of
+// the axis and an x title 1.6*size*offset pad heights below it (with a
+// precision-3 font, size/padw resp. size/padh); labels are centred on their tick.
+double pad_width_px(TVirtualPad *p) { return p->GetWw()*p->GetAbsWNDC(); }
+double pad_height_px(TVirtualPad *p) { return p->GetWh()*p->GetAbsHNDC(); }
+double pad_text_px(TVirtualPad *p) { return std::min(pad_width_px(p),pad_height_px(p)); }
+double axis_title_px(TAxis *a,TVirtualPad *p) { return a->GetTitleFont()%10==3 ? a->GetTitleSize() : a->GetTitleSize()*pad_text_px(p); }
+double axis_label_px(TAxis *a,TVirtualPad *p) { return a->GetLabelFont()%10==3 ? a->GetLabelSize() : a->GetLabelSize()*pad_text_px(p); }
+void set_axis_title_px(TAxis *a,TVirtualPad *p,double px) {
+  const double m=pad_text_px(p);
+  if(m>0 && px>0) a->SetTitleSize(a->GetTitleFont()%10==3 ? px : px/m);
+}
+void set_axis_label_px(TAxis *a,TVirtualPad *p,double px) {
+  const double m=pad_text_px(p);
+  if(m>0 && px>0) a->SetLabelSize(a->GetLabelFont()%10==3 ? px : px/m);
+}
+// Distance in pixels between an axis and the centre line of its title; the
+// pad length is its width for a vertical axis, its height for a horizontal one.
+double title_unit_px(TAxis *a,double pad_length) { return a->GetTitleFont()%10==3 ? a->GetTitleSize() : a->GetTitleSize()*pad_length; }
+double y_title_distance_px(TAxis *a,TVirtualPad *p) { return 1.6*a->GetTitleOffset()*title_unit_px(a,pad_width_px(p)); }
+void set_y_title_distance_px(TAxis *a,TVirtualPad *p,double d) {
+  const double u=title_unit_px(a,pad_width_px(p));
+  if(u>0 && d>0) a->SetTitleOffset(d/(1.6*u));
+}
+void set_x_title_distance_px(TAxis *a,TVirtualPad *p,double d) {
+  const double u=title_unit_px(a,pad_height_px(p));
+  if(u>0 && d>0) a->SetTitleOffset(d/(1.6*u));
+}
+// Length in pixels of an axis title drawn by ROOT (TLatex box width); gPad must be p.
+double axis_title_length_px(TAxis *a) {
+  if(!a->GetTitle()[0]) return 0;
+  TLatex probe; probe.SetTextFont(a->GetTitleFont()); probe.SetTextSize(a->GetTitleSize()); probe.SetTitle(a->GetTitle());
+  UInt_t w=0,h=0; probe.GetBoundingBox(w,h);
+  return w;
+}
+
+// Final text of a two-pad layout, after the request's axis styles (explicit
+// AxisStyle fields are kept as given, in ROOT's units for their own pad):
+// - the lower pad's axes take the upper y axis's pixel label and title sizes,
+//   so text has one size in both pads; a lower y title too long for its pad
+//   (it runs down from the frame top, or is centred) is reduced until it fits;
+// - the lower y title gets the upper title's distance from the axis, so both
+//   y titles line up. ROOT's automatic offset (0, as in ROOT's default style)
+//   is computed by each pad from its own labels and would not line up, so the
+//   upper title then sits next to the left pad edge (explicit offsets are > 0);
+// - the x title keeps its distance below the axis relative to the text sizes
+//   (styled: the style's one-pad distance; otherwise below the labels, which
+//   get a one-pad label offset);
+// - the upper pad's bottom margin and the lower pad's top margin leave room for
+//   half a y label, so labels at the frame edges (e.g. 1.5 and 0.5 on a 0.5-1.5
+//   ratio axis, 0 on a linear upper axis) stay inside their pads.
+void finish_two_pad_axes(TVirtualPad *top,TAxis *upper_y,TVirtualPad *bottom,
+                         TAxis *lower_x,const AxisSpec &x_spec,TAxis *lower_y,const AxisSpec &y_spec,bool styled) {
+  if(!top || !bottom || !upper_y || !lower_x || !lower_y) return;
+  auto set=[](const AxisSpec &s,int i){ return s.v[i]!="-"; };
+  const double th=pad_height_px(top),bh=pad_height_px(bottom),H=bottom->GetWh(),edge=3;
+  if(th<=0 || bh<=0 || H<=0) return;
+  const double title=axis_title_px(upper_y,top),label=axis_label_px(upper_y,top);
+  // Lower x axis.
+  const double xl0=axis_label_px(lower_x,bottom),xt0=axis_title_px(lower_x,bottom);
+  const double xd0=1.6*lower_x->GetTitleOffset()*title_unit_px(lower_x,bh);
+  if(!set(x_spec,AX_LABEL_SIZE)) set_axis_label_px(lower_x,bottom,label);
+  if(!set(x_spec,AX_TITLE_SIZE)) set_axis_title_px(lower_x,bottom,title);
+  if(!styled && !set(x_spec,AX_LABEL_OFFSET)) lower_x->SetLabelOffset(0.005*H/bh);
+  if(!set(x_spec,AX_TITLE_OFFSET)) {
+    const double xl=axis_label_px(lower_x,bottom),xt=axis_title_px(lower_x,bottom);
+    set_x_title_distance_px(lower_x,bottom,styled && xd0>0 && xl0+xt0>0 ? xd0*(xl+xt)/(xl0+xt0)
+                                           : lower_x->GetLabelOffset()*bh+xl+0.6*xt);
+  }
+  // Room for half a y label (plus a few pixels) at the frame edges between the pads.
+  if(!set(y_spec,AX_LABEL_SIZE)) set_axis_label_px(lower_y,bottom,label);
+  top->SetBottomMargin(std::max<double>(top->GetBottomMargin(),(0.5*label+edge)/th));
+  bottom->SetTopMargin(std::max<double>(bottom->GetTopMargin(),(0.5*axis_label_px(lower_y,bottom)+edge)/bh));
+  // Lower y title: the upper title's size (reduced to fit) and distance.
+  if(!set(y_spec,AX_TITLE_SIZE)) {
+    set_axis_title_px(lower_y,bottom,title);
+    TVirtualPad *previous=gPad; bottom->cd();
+    const double length=axis_title_length_px(lower_y);
+    if(previous) previous->cd();
+    const double t=bottom->GetTopMargin()*bh,b=bottom->GetBottomMargin()*bh,mid=0.5*(bh-t-b);
+    const double room=lower_y->GetCenterTitle() ? 2*(std::min(t,b)+mid-edge) : bh-t-edge;
+    if(length>room && room>0) set_axis_title_px(lower_y,bottom,title*room/length);
+  }
+  if(upper_y->GetTitleOffset()<=0)
+    set_y_title_distance_px(upper_y,top,top->GetLeftMargin()*pad_width_px(top)-0.6*title-edge);
+  if(!set(y_spec,AX_TITLE_OFFSET)) set_y_title_distance_px(lower_y,bottom,y_title_distance_px(upper_y,top));
+}
+
 // Last step before saving: draw the registered labels, then run the
 // ROOTPLOTS_AXIS_DUMP hook. Without labels the canvas is not touched.
 void finish_canvas(TVirtualPad &canvas) {

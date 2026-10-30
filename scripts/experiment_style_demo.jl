@@ -83,4 +83,23 @@ figure = PlotFigure([
 ]; layout=(2, 2), size=(1200, 900), style=:CMS)
 push!(files, render_root(figure, joinpath(output, "figure_2x2_cms")).png)
 
+# 9. CMS data vs. a four-process stacked prediction, log y, ratio panel 0.5-1.5:
+# the ratio pad's text has the upper pad's size and "1.5"/"0.5" stay inside the pad.
+pt = collect(35.0:10.0:205.0)
+yields = (zjets=[90, 55, 20, 13, 12, 6.5, 5.5, 3.5, 2.5, 1.2, 2.0, 1.0, 0.6, 0.7, 0.6, 0.6, 2.5],
+          diboson=[100, 95, 75, 62, 48, 38.5, 34.5, 26.5, 22.5, 18.8, 13, 12, 9.4, 7.3, 5.4, 3.4, 22.5],
+          single_t=[210, 150, 155, 125, 110, 105, 85, 80, 75, 65, 60, 52, 45, 42, 39, 36, 35],
+          ttbar=[2400, 1900, 1550, 1200, 930, 750, 575, 410, 280, 205, 145, 105, 85, 60, 40, 20, 200])
+mc(v) = Hist1D(pt, Float64.(v), 0.02 .* v)   # MC with 2% statistical variance per bin
+observed = [2600, 2100, 1750, 1350, 1050, 760, 600, 400, 300, 230, 170, 155, 120, 68, 65, 48, 220]
+cmp = comparison(Hist1D(pt, Float64.(observed), Float64.(observed)),
+                 [Component("Z + jets", mc(yields.zjets), "#2b7bba"), Component("Diboson", mc(yields.diboson), "#9467bd"),
+                  Component("Single t", mc(yields.single_t), "#e377c2"), Component("t#bar{t}", mc(yields.ttbar), "#c00020")];
+                 uncertainty_label="MC stat. unc.")
+push!(files, render_root([cmp], [PanelSpec("Lepton p_{T} (GeV)"; ylabel="Events / 10 GeV", logy=true,
+                                           ratio_limits=(0.5, 1.5), style=:CMS,
+                                           cms_label=(extra="tutorial", lumi="1.21 fb^{-1}", energy="13.6 TeV",
+                                                      position=:outside))],
+                         joinpath(output, "stack_ratio_cms_logy")).png)
+
 foreach(println, files)

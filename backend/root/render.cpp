@@ -465,22 +465,15 @@ void draw_panel(const Panel &p, int col, int count, const Figure &figure,
   d.ratio_axis->SetMaximum(p.ratio_max);
   d.ratio_axis->GetYaxis()->SetTitle("Data / pred.");
   d.ratio_axis->GetXaxis()->SetTitle(p.xlabel.c_str());
-  if (styled) {
-    style_scaled_axis(d.ratio_axis->GetXaxis(), "X", bottom, true);
-    style_scaled_axis(d.ratio_axis->GetYaxis(), "Y", bottom, false);
-    // The short ratio pad holds the long title at 80% of the style's size.
-    d.ratio_axis->GetYaxis()->SetTitleSize(0.8 * d.ratio_axis->GetYaxis()->GetTitleSize());
-  } else {
-    d.ratio_axis->GetYaxis()->SetTitleSize(0.10);
-    d.ratio_axis->GetYaxis()->SetTitleOffset(0.63);
-    d.ratio_axis->GetYaxis()->SetLabelSize(0.09);
-    d.ratio_axis->GetXaxis()->SetTitleSize(0.12);
-    d.ratio_axis->GetXaxis()->SetLabelSize(0.10);
-    d.ratio_axis->GetXaxis()->SetTitleOffset(1.05);
-  }
+  // The ratio pad's text takes the upper y axis's pixel sizes, and the two y
+  // titles line up (finish_two_pad_axes).
+  if (styled) style_scaled_axis(d.ratio_axis->GetXaxis(), "X", bottom, true);
   d.ratio_axis->GetYaxis()->SetNdivisions(503);
   apply_axis_spec(d.ratio_axis->GetXaxis(), p.xaxis, "x");
   apply_axis_spec(d.ratio_axis->GetYaxis(), p.ratio_axis, "y");
+  finish_two_pad_axes(top, d.stack->GetYaxis(), bottom, d.ratio_axis->GetXaxis(), p.xaxis,
+                      d.ratio_axis->GetYaxis(), p.ratio_axis, styled);
+  bottom->cd();
   d.ratio_axis->Draw("AXIS");
   d.unity = std::make_unique<TLine>(edges.front(), 1, edges.back(), 1);
   d.unity->SetLineWidth(figure.line_width); d.unity->Draw("SAME");

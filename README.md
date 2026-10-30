@@ -7,7 +7,7 @@ plot specifications are Julia values; a small C++ bridge runs ROOT in isolated
 batch processes and writes PNG/PDF. No Julia plotting package, Python, PyCall, or
 GUI is required. ROOT itself must be installed separately.
 
-**Status:** experimental (0.2.1). Source on GitHub; not registered in the Julia
+**Status:** experimental (0.2.2). Source on GitHub; not registered in the Julia
 General registry. The former package name was `JuliaROOT`. See [migration](docs/migration.md).
 
 ![Synthetic ROOT graphics gallery](docs/images/overview.png)

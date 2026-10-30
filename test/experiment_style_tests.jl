@@ -343,3 +343,111 @@ end
         @test only(pads).margins[4] ≅ 0.03 && only(ok)
     end
 end
+
+# Two-pad views (comparison ratio pad, fit/pull): text has one absolute (pixel)
+# size in both pads, the two y titles line up, and labels at the frame edges
+# (1.5 and 0.5 on a 0.5-1.5 ratio axis, 0 on a linear upper axis) end inside
+# their pads. Pixel sizes come from the dump (ROOT's sizes are fractions of the
+# smaller pad dimension, or pixels for precision-3 fonts) and the PNG size.
+if TEST_NATIVE_ROOT
+"""Pixel geometry of the two pads of a dumped two-pad canvas rendered to png."""
+function two_pad_geometry(c, png, upper, lower)
+    full = ROOTPlots.image_ink_bounds(png)
+    W, H = full.width, full.height
+    function geometry(p)
+        w, h = p.place[3] * W, p.place[4] * H
+        px(size, font) = font % 10 == 3 ? size : size * min(w, h)
+        unit(a, length) = a.title_font % 10 == 3 ? a.title_size : a.title_size * length
+        x0, y0 = round(Int, p.place[1] * W), round(Int, (1 - p.place[2] - p.place[4]) * H)
+        x1, y1 = round(Int, (p.place[1] + p.place[3]) * W) - 1, round(Int, (1 - p.place[2]) * H) - 1
+        (; pad=p, w, h, x0, y0, x1, y1, frame_left=x0 + round(Int, p.margins[1] * w),
+         frame_top=y0 + round(Int, p.margins[4] * h), frame_bottom=y1 - round(Int, p.margins[3] * h),
+         y_label=px(p.axes["y"].label_size, p.axes["y"].label_font), y_title=px(p.axes["y"].title_size, p.axes["y"].title_font),
+         x_label=px(p.axes["x"].label_size, p.axes["x"].label_font), x_title=px(p.axes["x"].title_size, p.axes["x"].title_font),
+         # TGaxis: a y title 1.6*size*offset pad widths left of the axis
+         y_title_distance=1.6 * p.axes["y"].title_offset * unit(p.axes["y"], w))
+    end
+    return geometry(only(q for q in c.pads if q.name == upper)), geometry(only(q for q in c.pads if q.name == lower))
+end
+"""Render with f(stem), then run check(c, upper, lower, png) while the PNG exists."""
+two_pad_render(check, f, name, upper, lower) = mktempdir() do keep
+    png = joinpath(keep, name * ".png")
+    c = only(with_axis_dump(dir -> cp(f(joinpath(dir, name)).png, png)))
+    check(c, two_pad_geometry(c, png, upper, lower)..., png)
+end
+# Equal pixel sizes and aligned titles; room for half a y label at both inner frame edges;
+# ink: the edge labels (and anything else) stay at least 2 pixels inside the pads.
+function two_pad_ok(t, b, png)
+    ok = isapprox(b.y_label, t.y_label; rtol=0.01) && isapprox(b.x_label, t.y_label; rtol=0.01) &&
+         isapprox(b.x_title, t.y_title; rtol=0.01) && isapprox(b.y_title, t.y_title; rtol=0.01) &&
+         abs(b.y_title_distance - t.y_title_distance) <= 1
+    ok &= b.pad.margins[4] * b.h >= 0.5 * b.y_label + 2 && t.pad.margins[3] * t.h >= 0.5 * t.y_label + 2
+    # Left of the lower frame, from the pad top to below the frame top: the top label (1.5) is inside.
+    top_label = ROOTPlots.image_ink_bounds(png; region=(b.x0, b.y0, b.frame_left - 2, b.frame_top + round(Int, b.y_label)))
+    ok &= top_label.ymin >= b.y0 + 2
+    # Left of the upper frame, its lowest labels end above the pad's bottom edge.
+    low_label = ROOTPlots.image_ink_bounds(png; region=(t.x0, t.frame_bottom - round(Int, t.y_label), t.frame_left - 2, t.y1))
+    ok &= low_label.ymax == -1 || low_label.ymax <= t.y1 - 2
+    # Nothing in the upper pad (exponent, labels, titles) reaches its top edge.
+    ok &= ROOTPlots.image_ink_bounds(png; region=(t.x0, t.y0, t.x1, t.y1)).ymin >= t.y0 + 2
+    return ok
+end
+
+@testset "two-pad text and edge labels" begin
+    # A CMS-like data/MC comparison: falling stacked prediction, counts in the thousands.
+    edges = collect(35.0:10.0:205.0)
+    zj = [90, 55, 20, 13, 12, 6.5, 5.5, 3.5, 2.5, 1.2, 2.0, 1.0, 0.6, 0.7, 0.6, 0.6, 2.5]
+    total = [2800, 2200, 1800, 1400, 1100, 900, 700, 520, 380, 290, 220, 170, 140, 110, 85, 60, 260]
+    mk(v) = Hist1D(edges, Float64.(v), 0.02 .* v)
+    cmp = comparison(Hist1D(edges, round.(0.9 .* total), round.(0.9 .* total)),
+                     [Component("Z + jets", mk(zj), "#1f77b4"), Component("t#bar{t}", mk(total .- zj), "#c00020")];
+                     uncertainty_label="MC stat. unc.")
+    values = vec([a + b + c + d for a in -1:0.25:1, b in -1:0.25:1, c in -1:0.25:1, d in -1:0.25:1]) .+ 0.1
+    h = histogram(values, collect(range(-4.0, 4.0; length=17))).hist
+    fit = fit_root(h, :gaus; initial=[1500.0, 0.0, 1.2])
+    for style in (nothing, :CMS, :ATLAS), logy in (false, true)
+        label = style == :CMS ? (cms_label=(extra="tutorial", lumi="1.21 fb^{-1}", energy="13.6 TeV"),) :
+                style == :ATLAS ? (atlas_label=(energy="13.6 TeV", lumi="1.21 fb^{-1}"),) : (;)
+        spec = PanelSpec("Lepton p_{T} (GeV)"; ylabel="Events / 10 GeV", logy, ratio_limits=(0.5, 1.5), style, label...)
+        two_pad_render(stem -> render_root([cmp], [spec], stem), "ratio", "top0", "bottom0") do c, t, b, png
+            @test two_pad_ok(t, b, png)
+            @test b.pad.axes["y"].title == "Data / pred."
+        end
+        two_pad_render(stem -> render_root(h, fit, GraphSpec(; xlabel="x", ylabel="Entries", logy, style), stem),
+                       "fitpull", "fit_top", "fit_bottom") do c, t, b, png
+            @test two_pad_ok(t, b, png)
+        end
+    end
+    # The default style's title sizes are kept (upper pad as before; the ratio pad follows it).
+    two_pad_render(stem -> render_root([cmp], [PanelSpec("x")], stem), "plain", "top0", "bottom0") do c, t, b, png
+        @test t.pad.axes["y"].title_size ≅ 0.035 && t.pad.axes["y"].label_size ≅ 0.038 && t.pad.axes["y"].title_offset ≅ 1.55
+    end
+    # Under CMS the upper y title keeps the style's one-pad size (0.06 of the canvas width).
+    two_pad_render(stem -> render_root([cmp], [PanelSpec("x"; style=:CMS)], stem), "cms", "top0", "bottom0") do c, t, b, png
+        @test isapprox(t.y_title, 0.06 * t.w; rtol=0.01) && isapprox(t.y_label, 0.05 * t.w; rtol=0.01)
+    end
+
+    # Explicit sizes win, in ROOT's units for their own pad; unset lower-pad sizes follow
+    # the upper y axis (a precision-3 font gives pixels).
+    spec = PanelSpec("x"; style=:CMS, yaxis=AxisStyle(title_size=0.035, label_size=0.035))
+    two_pad_render(stem -> render_root([cmp], [spec], stem), "small", "top0", "bottom0") do c, t, b, png
+        @test t.pad.axes["y"].title_size ≅ 0.035 && two_pad_ok(t, b, png)
+        @test isapprox(b.y_label, 0.035 * min(t.w, t.h); rtol=0.01)
+    end
+    spec = PanelSpec("x"; yaxis=AxisStyle(title_font=43, title_size=24), ratio_yaxis=AxisStyle(label_size=0.12))
+    two_pad_render(stem -> render_root([cmp], [spec], stem), "explicit", "top0", "bottom0") do c, t, b, png
+        @test t.pad.axes["y"].title_size ≅ 24 && b.pad.axes["y"].label_size ≅ 0.12 && b.pad.axes["y"].title_font == 42
+        @test isapprox(b.y_title, 24; rtol=0.01) && isapprox(b.x_title, 24; rtol=0.01)
+        @test abs(b.y_title_distance - t.y_title_distance) <= 1
+    end
+    spec = PanelSpec("x"; ratio_yaxis=AxisStyle(title_offset=2.0))
+    two_pad_render(stem -> render_root([cmp], [spec], stem), "offset", "top0", "bottom0") do c, t, b, png
+        @test b.pad.axes["y"].title_offset ≅ 2.0
+    end
+    # ROOT's automatic y title offset (the default style's 0, here with a label only) would
+    # differ between the pads; the titles still line up.
+    two_pad_render(stem -> render_root([cmp], [PanelSpec("x"; cms_label=true)], stem), "auto", "top0", "bottom0") do c, t, b, png
+        @test t.pad.axes["y"].title_offset > 0 && two_pad_ok(t, b, png)
+    end
+end
+end

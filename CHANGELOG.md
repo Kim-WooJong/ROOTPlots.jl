@@ -1,5 +1,30 @@
 # Changelog
 
+## 0.2.2 (2026-10-30)
+
+- Two-pad views (comparison ratio panels and fit/pull), with the default style,
+  CMS, ATLAS or any ROOT style: labels at the frame edges between the pads are no
+  longer cut. The ratio/pull pad's top margin and the upper pad's bottom margin now
+  leave room for half a y label, so e.g. "1.5" and "0.5" of a 0.5-1.5 ratio axis
+  and "0" of a linear upper axis are drawn whole (before, the ratio frame touched
+  the top of its pad and "1.5" was clipped).
+- Two-pad views: one text size in both pads. ROOT sizes axis text relative to each
+  pad's height, so the short ratio pad enlarged its labels and titles and the
+  upper pad shrank them (most visible when `yaxis` sizes were set: a small
+  "Events" title over a large "Data / pred."). The lower pad's labels and titles
+  now take the upper y axis's sizes in pixels (under a style, the style's one-pad
+  sizes), the ratio/pull y title is placed at the upper title's distance from the
+  axis so the two titles line up, and a ratio y title too long for its pad is
+  reduced to fit (the former fixed 80% reduction under a style is gone). ROOT's
+  automatic y title offset (0 in ROOT's default style, used with a label but no
+  style) would place the two titles differently; the upper title then sits next to
+  the left pad edge. Explicit `AxisStyle` sizes and offsets still win and keep
+  ROOT's meaning for their own pad (documented under "Two-pad views" in the API
+  docs; precision-3 fonts give pixel sizes).
+- `scripts/experiment_style_demo.jl`: a CMS data/MC comparison with log y and a
+  0.5-1.5 ratio panel (`stack_ratio_cms_logy`).
+- Visual reference `ratio_panel.png` regenerated (ratio pad text and margins).
+
 ## 0.2.1 (2026-10-30)
 
 - Design principle recorded (README, `docs/design.md`, API docs): ROOTPlots is a Julia

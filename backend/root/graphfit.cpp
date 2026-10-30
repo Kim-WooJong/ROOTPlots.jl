@@ -953,16 +953,13 @@ void draw_fit(const std::vector<std::vector<std::string>> &rows, const std::stri
   auto *lower=bottom->DrawFrame(xmin,pullmin,xmax,pullmax);
   lower->GetXaxis()->SetTitle(xlabel.c_str());
   lower->GetYaxis()->SetTitle("Pull");
-  if(styled) { style_scaled_axis(lower->GetXaxis(),"X",bottom,true); style_scaled_axis(lower->GetYaxis(),"Y",bottom,false);
-               lower->GetYaxis()->CenterTitle(kTRUE); }
-  else {
-    lower->GetXaxis()->SetTitleSize(0.12); lower->GetXaxis()->SetLabelSize(0.10);
-    lower->GetXaxis()->SetTitleOffset(1.05);
-    lower->GetYaxis()->SetTitleSize(0.11); lower->GetYaxis()->SetLabelSize(0.09);
-    lower->GetYaxis()->SetTitleOffset(0.51);
-  }
+  // The pull pad's text takes the upper y axis's pixel sizes, and the two y
+  // titles line up (finish_two_pad_axes).
+  if(styled) { style_scaled_axis(lower->GetXaxis(),"X",bottom,true); lower->GetYaxis()->CenterTitle(kTRUE); }
   lower->GetYaxis()->SetNdivisions(505);
   apply_axis_spec(lower->GetXaxis(),scene.axes[0],"x");
+  finish_two_pad_axes(top,upper->GetYaxis(),bottom,lower->GetXaxis(),scene.axes[0],lower->GetYaxis(),AxisSpec(),styled);
+  bottom->cd();
   auto zero=std::make_unique<TLine>(xmin,0,xmax,0);
   zero->SetLineStyle(2); zero->SetLineColor(kGray+2); zero->Draw("SAME");
   graphs[2]->Draw(draw_option(series[2]).c_str());

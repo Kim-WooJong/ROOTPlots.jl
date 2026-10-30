@@ -860,8 +860,9 @@ style's attributes, while explicit settings applied afterwards keep their values
   the exponent grows as well);
   automatic legends use 0.8 x the style's label size; the fit/pull and
   comparison views take the style's side margins, ticks, and text sizes,
-  rescaled to each pad's height so text keeps its one-pad size, and the
-  comparison legend moves into the frame. 3-D views keep the package's margins.
+  rescaled to each pad's height so text keeps its one-pad size (see "Two-pad
+  views" below), and the comparison legend moves into the frame. 3-D views keep
+  the package's margins.
 - The style is process-global (one per canvas): figure panels and comparison
   panels that name a style must agree. `PlotFigure(...; style=:CMS)` gives the
   style to every panel spec without one.
@@ -1040,6 +1041,36 @@ styles, grids, and the title box.
 - Fit/pull figure (`render_root(h, fit, spec, stem)`): `xaxis` applies to both pads,
   `yaxis` to the upper pad, grids/ticks to both pads, and the title box to the
   upper pad. Its margins, annotations, and legend stay layout-owned.
+
+**Two-pad views: text sizes and edge labels.** ROOT gives axis text sizes as a
+fraction of the smaller pad dimension (pixels for precision-3 fonts, e.g. 43), so
+one value is larger in the short ratio/pull pad than in the upper pad. The
+comparison and fit/pull layouts therefore size the lower pad from the upper y
+axis, after the request's axis styles:
+
+- The lower pad's y labels and title and its x labels and title get the upper y
+  axis's label and title sizes in pixels (under a style: the style's one-pad
+  sizes, e.g. 0.05/0.06 of the canvas width under `style=:CMS`). A lower y
+  title longer than its pad (e.g. "Data / pred." at the CMS size) is reduced
+  until it fits.
+- The lower y title is placed at the upper title's distance from the axis, so
+  the two titles line up (`TAxis::SetTitleOffset` is converted between the pads,
+  since TGaxis places a y title 1.6 x size x offset pad widths from the axis). ROOT's
+  automatic y title offset (0, e.g. ROOT's default style) is computed per pad from
+  its own labels; in a two-pad view the upper title is then placed next to the
+  left pad edge instead.
+- The upper pad's bottom margin and the lower pad's top margin leave room for
+  half a y label, so labels at the frame edges (1.5 and 0.5 of a 0.5-1.5 ratio
+  axis, 0 of a linear upper axis) are drawn whole inside their pads. To drop an
+  edge label instead, use `ratio_yaxis=AxisStyle(change_labels=LabelChange(-1; size=0))`
+  or `divisions`.
+- Explicit `AxisStyle` sizes and offsets win and keep ROOT's meaning for the pad
+  they are drawn in: `yaxis` sizes are fractions of the upper pad, `ratio_yaxis`
+  and `xaxis` sizes fractions of the ratio pad. Sizes left unset in the lower
+  pad still follow the upper y axis, so `yaxis=AxisStyle(title_size=0.035,
+  label_size=0.035)` makes the whole figure's axis text that size. For one
+  pixel size given directly, use a precision-3 font, e.g.
+  `AxisStyle(title_font=43, title_size=24)` (24 pixels in either pad).
 
 ### Coverage (audit)
 

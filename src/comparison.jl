@@ -47,7 +47,10 @@ One stacked comparison panel with its ratio pad. Caller-provided labels:
 - `style`, `cms_label`, `atlas_label`: ROOT style and experiment label as in
   [`GraphSpec`](@ref) (panels of one figure must name the same style). With a style
   or a label, both pads take the style's margins, ticks and text sizes rescaled
-  to the pad heights, and the legend moves into the frame. A label carries the
+  to the pad heights, and the legend moves into the frame. In every case the
+  ratio pad's text has the upper y axis's pixel size and the two y titles line
+  up; explicit `AxisStyle` sizes are ROOT's values for their own pad (see the API
+  documentation, "Two-pad views"). A label carries the
   panel texts: `lumi` is the CMS luminosity text (or the ATLAS second line) unless
   the label gives `lumi`/`energy`, and `annotation` is drawn as a line below it.
 """
