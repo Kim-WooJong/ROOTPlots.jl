@@ -18,7 +18,9 @@ latex(pad, text) = filter(t -> t.text == text, pad.latex)
     # One switch: style=:CMS selects the style and the default CMS label.
     rows = scene_rows(GraphSpec(style=:CMS))
     @test rows[1] == "SCENE\t1" && rows[2] == "ROOTSTYLE\tCMS" && rows[end] == "ENDSCENE"
-    @test label_row(GraphSpec(style=:CMS)) == ["EXPLABEL", "CMS", "inside_left", "Preliminary", "-", "0"]
+    # cmsCanvas geometry row (cmsstyle defaults: extraSpace 0, yTitOffset from the canvas shape).
+    @test rows[3] == "CMSCANVAS\t0.0\t-"
+    @test label_row(GraphSpec(style=:CMS)) == ["EXPLABEL", "CMS", "inside_left", "Preliminary", "-", "CMS", "1.0", "0"]
     @test label_row(GraphSpec(style=:cms)) !== nothing                    # names are case-insensitive
     @test label_row(GraphSpec(style=:CMS, cms_label=false)) === nothing
     @test label_row(GraphSpec(style=:ATLAS)) === nothing                  # the ATLAS label is opt-in
@@ -29,6 +31,38 @@ latex(pad, text) = filter(t -> t.text == text, pad.latex)
     @test (l.kind, l.extra, l.right, l.position) == ("CMS", "Simulation", "138 fb^{-1} (13 TeV)", :outside)
     @test ROOTPlots.experiment_label(GraphSpec(cms_label=(energy="13.6 TeV",))).right == "(13.6 TeV)"
     @test ROOTPlots.experiment_label(GraphSpec(cms_label=(lumi="1 fb^{-1}", extra=""))).extra == ""
+
+    # cmsstyle options: iPos codes, SetExtraText nicknames, SetCmsText, AppendAdditionalInfo,
+    # CMS_lumi scaleLumi, a free right text, and the cmsCanvas extraSpace / yTitOffset.
+    @test [ROOTPlots.experiment_label(GraphSpec(cms_label=(position=i,))).position for i in (0, 11, 22, 33)] ==
+          [:outside, :inside_left, :inside_center, :inside_right]
+    @test ROOTPlots.experiment_label(GraphSpec(cms_label=(position=:inside_center,))).position == :inside_center
+    @test [ROOTPlots.experiment_label(GraphSpec(cms_label=(extra=x,))).extra for x in ("p", "s", "su", "wip", "pw")] ==
+          ["Preliminary", "Simulation", "Supplementary", "Work in progress", "Private work (CMS data)"]
+    @test ROOTPlots.experiment_label(GraphSpec(cms_label=(extra="pw",))).cms_text == ""     # "Private": no "CMS"
+    @test ROOTPlots.experiment_label(GraphSpec(cms_label=(extra="pw", cms_text="CMS"))).cms_text == "CMS"
+    l = ROOTPlots.experiment_label(GraphSpec(style=:CMS, cms_label=(position=0, right="University of Seoul",
+                                   additional_info=["ME0 aging test", "GE1/1"], scale_lumi=1.2, cms_text="CMS-TOTEM",
+                                   extra_space=0.05, y_title_offset=1.1)))
+    @test (l.position, l.right, l.lines, l.scale_lumi, l.cms_text) ==
+          (:outside, "University of Seoul", ["ME0 aging test", "GE1/1"], 1.2, "CMS-TOTEM")
+    @test ROOTPlots.experiment_label(GraphSpec(cms_label=(additional_info="one line",))).lines == ["one line"]
+    spec = GraphSpec(style=:CMS, cms_label=(right="UoS", additional_info="x", extra_space=0.05, y_title_offset=1.1))
+    @test label_row(spec) == ["EXPLABEL", "CMS", "inside_left", "Preliminary", "UoS", "CMS", "1.0", "1", "x"]
+    @test scene_rows(spec)[3] == "CMSCANVAS\t0.05\t1.1"
+    @test ROOTPlots.cms_canvas_options(GraphSpec(style=:cms)) == (extra_space=0.0, y_title_offset=nothing)
+    @test ROOTPlots.cms_canvas_options(GraphSpec(cms_label=true)) === nothing        # label without the style
+    @test ROOTPlots.cms_canvas_options(Graph3DSpec(style=:CMS)) === nothing         # 3-D views keep their margins
+    @test !any(startswith("CMSCANVAS"), scene_rows(GraphSpec(style=:ATLAS)))
+    for bad in ((right="a", lumi="b"), (position=12,), (position=true,), (scale_lumi=0,), (scale_lumi="1",),
+                (additional_info=[1],), (additional_info=fill("x", 9),), (extra_space=0.6,), (y_title_offset=-1.0,))
+        @test_throws ArgumentError ROOTPlots.validate_style_and_label(GraphSpec(style=:CMS, cms_label=bad))
+    end
+    # cmsCanvas options need the CMS style.
+    @test_throws ArgumentError ROOTPlots.validate_style_and_label(GraphSpec(cms_label=(extra_space=0.05,)))
+    @test_throws ArgumentError ROOTPlots.validate_style_and_label(GraphSpec(style=:Plain, cms_label=(y_title_offset=1.1,)))
+    # ATLAS labels have no centre position.
+    @test_throws ArgumentError ROOTPlots.validate_style_and_label(GraphSpec(atlas_label=(position=:inside_center,)))
     a = ROOTPlots.experiment_label(GraphSpec(atlas_label=(energy="13 TeV", lumi="140 fb^{-1}")))
     @test (a.kind, a.extra, a.lines, a.right) == ("ATLAS", "Internal", ["#sqrt{s} = 13 TeV, 140 fb^{-1}"], "")
     @test ROOTPlots.experiment_label(GraphSpec(atlas_label=true)).lines == String[]
@@ -82,34 +116,83 @@ if TEST_NATIVE_ROOT
     @test c.style[].name == "Modern"
     @test isempty(only(framed(c)).latex)
 
-    # One switch: the CMS TStyle values and the CMS label in the pad.
+    # One switch: the CMS TStyle (cmsstyle setCMSStyle values), the cmsCanvas
+    # geometry of an 800x600 canvas, and the CMS_lumi label in the pad.
     spec = GraphSpec(xlabel="m [GeV]", ylabel="Events", style=:CMS, cms_label=(lumi="138 fb^{-1}", energy="13 TeV"))
     c = only(with_axis_dump(dir -> render_root([s], spec, joinpath(dir, "cms"))))
     st = c.style[]
-    @test st.name == "CMS" && st.margins ≅ (0.16, 0.04, 0.13, 0.08)
+    # cmsCanvas(square=false): L = (0.145*600 + 0.78*50 - 60)/800, R = 0.05*600/800, B = 0.125 + 0.02, T = 0.07.
+    cms_margins = ((87 + 0.78 * 50 - 60) / 800, 30 / 800, 0.145, 0.07)
+    @test st.name == "CMS" && st.margins ≅ cms_margins
     @test (st.label_font, st.title_font) == (42, 42) && (st.label_size, st.title_size) ≅ (0.05, 0.06)
     @test (st.tickx, st.ticky, st.optstat) == (1, 1, 0)
     pad = only(framed(c))
-    @test pad.margins ≅ (0.16, 0.04, 0.13, 0.08)
+    @test pad.margins ≅ cms_margins
     @test (pad.tickx, pad.ticky) == (1, 1)
     @test pad.axes["x"].label_size ≅ 0.05 && pad.axes["y"].title_size ≅ 0.06 && pad.axes["x"].label_font == 42
+    @test pad.axes["x"].label_offset ≅ 0.012 && pad.axes["x"].title_offset ≅ 1.05 && pad.axes["y"].title_offset ≅ 0.78
+    l, r, b, t = cms_margins
     cms = only(latex(pad, "CMS")); pre = only(latex(pad, "Preliminary")); lumi = only(latex(pad, "138 fb^{-1} (13 TeV)"))
-    @test (cms.font, cms.align, cms.ndc) == (61, 13, true) && cms.size ≅ 0.75 * 0.08
-    @test cms.x ≅ 0.16 + 0.045 * 0.80 && cms.y ≅ 1 - 0.08 - 0.035 * 0.79
-    @test (pre.font, pre.align) == (52, 13) && pre.size ≅ 0.76 * 0.75 * 0.08 && pre.y < cms.y
-    @test (lumi.font, lumi.align) == (42, 31) && lumi.size ≅ 0.6 * 0.08 && lumi.x ≅ 0.96 && lumi.y > 0.92
+    @test (cms.font, cms.align, cms.ndc) == (61, 13, true) && cms.size ≅ 0.75 * t
+    @test cms.x ≅ l + 0.035 * (1 - l - r) && cms.y ≅ 1 - t - 0.035 * (1 - t - b)
+    @test (pre.font, pre.align) == (52, 13) && pre.size ≅ 0.76 * 0.75 * t && pre.y ≅ cms.y - 1.2 * 0.75 * t
+    @test (lumi.font, lumi.align) == (42, 31) && lumi.size ≅ 0.6 * t && lumi.x ≅ 1 - r && lumi.y ≅ 1 - t + 0.2 * t
 
     # Explicit options still win over the style.
     spec = GraphSpec(style=:CMS, canvas=CanvasStyle(left_margin=0.2, ticks_y=false), xaxis=AxisStyle(label_size=0.03))
     pad = only(framed(only(with_axis_dump(dir -> render_root([s], spec, joinpath(dir, "override"))))))
     @test pad.margins[1] ≅ 0.2 && pad.ticky == 0 && pad.axes["x"].label_size ≅ 0.03 && pad.axes["y"].label_size ≅ 0.05
-    @test only(latex(pad, "CMS")).x ≅ 0.2 + 0.045 * 0.76
+    @test only(latex(pad, "CMS")).x ≅ 0.2 + 0.035 * (1 - 0.2 - r)
 
-    # Outside position: "CMS" and the extra text on one line above the frame.
+    # Outside position (iPos 0): "CMS" and the extra text on one line above the
+    # frame, the extra text at cmsstyle's offset 0.043*52*size(CMS)*H/W.
     spec = GraphSpec(style=:CMS, cms_label=(extra="Simulation", position=:outside))
-    pad = only(framed(only(with_axis_dump(dir -> render_root([s], spec, joinpath(dir, "outside"))))))
-    cms = only(latex(pad, "CMS")); sim = only(latex(pad, "Simulation"))
-    @test cms.align == 11 && sim.align == 11 && cms.y ≅ sim.y && cms.y > 0.92 && sim.x > cms.x && sim.font == 52
+    mktempdir() do keep
+        png = joinpath(keep, "outside.png")
+        pad = only(framed(only(with_axis_dump(dir -> cp(render_root([s], spec, joinpath(dir, "outside")).png, png)))))
+        cms = only(latex(pad, "CMS")); sim = only(latex(pad, "Simulation"))
+        ink = ROOTPlots.image_ink_bounds(png)
+        @test cms.align == 11 && sim.align == 11 && cms.y ≅ sim.y && cms.y ≅ 1 - t + 0.2 * t && sim.font == 52
+        @test cms.x ≅ l && sim.x ≅ l + 0.043 * 52 * cms.size * ink.height / ink.width
+    end
+
+    # The ME0 stability layout: cmsCanvas(square=false, iPos=0, extraSpace=0.05,
+    # yTitOffset=1.1), a right text at the luminosity position, log y.
+    spec = GraphSpec(xlabel="Integrated charge [C/cm^{2}]", ylabel="Gain", ylimits=(5e3, 1e6), logy=true, style=:CMS,
+                     cms_label=(position=0, right="University of Seoul", extra_space=0.05, y_title_offset=1.1))
+    pad = only(framed(only(with_axis_dump(dir -> render_root([GraphSeries([1.0, 2.0], [4e4, 6e4])], spec, joinpath(dir, "me0"))))))
+    @test pad.margins ≅ ((87 + 1.1 * 50 - 60) / 800 + 0.05, 30 / 800, 0.145, 0.07)
+    @test pad.axes["y"].title_offset ≅ 1.1 && pad.axes["x"].title_offset ≅ 1.05
+    right = only(latex(pad, "University of Seoul"))
+    @test (right.font, right.align) == (42, 31) && right.size ≅ 0.6 * 0.07 && right.x ≅ 1 - 30 / 800
+    @test only(latex(pad, "Preliminary")).align == 11
+
+    # cmsCanvas(square=true) on 600x600, yTitOffset 1.6 (second adjustment band): L = 87 + (1.6-1.4)*35 + 25.
+    pad = only(framed(only(with_axis_dump(dir -> render_root([s], GraphSpec(size=(600, 600), style=:CMS), joinpath(dir, "sq"))))))
+    @test pad.margins ≅ (87 / 600 + (1.2 * 50 - 60) / 600, 0.05, 0.145, 0.07) && pad.axes["y"].title_offset ≅ 1.2
+    spec = GraphSpec(size=(600, 600), style=:CMS, cms_label=(y_title_offset=1.6,))
+    pad = only(framed(only(with_axis_dump(dir -> render_root([s], spec, joinpath(dir, "sq16"))))))
+    @test pad.margins[1] ≅ (87 + 0.2 * 35 + 25) / 600
+
+    # Inside positions 22/33, additional info lines, scaleLumi, no CMS text for "Private" extra text.
+    spec = GraphSpec(style=:CMS, cms_label=(position=22, lumi="1 fb^{-1}", scale_lumi=1.25,
+                                            additional_info=["ee channel", "p_{T} > 20 GeV"]))
+    pad = only(framed(only(with_axis_dump(dir -> render_root([s], spec, joinpath(dir, "centre"))))))
+    cms = only(latex(pad, "CMS")); pre = only(latex(pad, "Preliminary"))
+    i1 = only(latex(pad, "ee channel")); i2 = only(latex(pad, "p_{T} > 20 GeV"))
+    info_step = 1.2 * 0.76 * 0.75 * t / 2 + 0.02
+    @test cms.align == 23 && cms.x ≅ l + 0.5 * (1 - l - r) && pre.x ≅ cms.x
+    @test (i1.font, i1.align) == (42, 23) && i1.size ≅ 0.76 * 0.75 * t
+    @test i1.y ≅ pre.y - 0.004 - info_step && i2.y ≅ pre.y - 0.004 - 2info_step
+    @test only(latex(pad, "1 fb^{-1}")).size ≅ 0.6 * t * 1.25
+    pad = only(framed(only(with_axis_dump(dir -> render_root([s], GraphSpec(style=:CMS, cms_label=(position=33, extra="pw")),
+                                                             joinpath(dir, "private"))))))
+    @test isempty(latex(pad, "CMS")) && only(latex(pad, "Private work (CMS data)")).align == 33
+    @test only(latex(pad, "Private work (CMS data)")).x ≅ 1 - r - 0.035 * (1 - l - r)
+
+    # A one-panel figure is a single-pad canvas (multi-panel figures: see below).
+    c = only(with_axis_dump(dir -> render_root(PlotPanel([s], GraphSpec(style=:CMS, size=(800, 600))), joinpath(dir, "panel"))))
+    @test only(framed(c)).margins ≅ cms_margins
 
     # ROOT's built-in ATLAS style and the ATLAS label.
     spec = GraphSpec(style=:ATLAS, atlas_label=(text="Internal", energy="13 TeV", lumi="140 fb^{-1}"))
@@ -127,10 +210,9 @@ if TEST_NATIVE_ROOT
         bad = GraphSpec(style=:NoSuchStyle)
         input = joinpath(dir, "graph.tsv")
         ROOTPlots.write_graph_spec(input, [s], bad, ROOTPlots.graph_limits([s], bad))
-        err = IOBuffer()
-        proc = run(pipeline(ignorestatus(Cmd([exe, input, joinpath(dir, "out")])); stderr=err))
-        message = String(take!(err))
-        @test proc.exitcode != 0
+        proc = run_native(exe, input, joinpath(dir, "out"))
+        message = proc.stderr
+        @test proc.exitcode == 2 && proc.termsignal == 0 && !isfile(joinpath(dir, "out.png"))
         @test occursin("unknown ROOT style \"NoSuchStyle\"", message) && occursin("ATLAS", message) &&
               occursin("CMS", message) && occursin("Plain", message)
     end
@@ -143,8 +225,8 @@ if TEST_NATIVE_ROOT
     @test fit.status == 0 && fit.valid
     c = only(with_axis_dump(dir -> render_root(h, fit, GraphSpec(style=:CMS), joinpath(dir, "fitpull"))))
     top = only(p for p in c.pads if p.name == "fit_top"); bottom = only(p for p in c.pads if p.name == "fit_bottom")
-    @test top.margins[4] ≅ 0.08 / 0.70 && bottom.margins[3] ≅ 0.13 / 0.30 && top.margins[1] ≅ 0.16
-    @test only(latex(top, "CMS")).size ≅ 0.75 * 0.08 * 600 / 420 && isempty(latex(bottom, "CMS"))
+    @test top.margins[4] ≅ 0.05 / 0.70 && bottom.margins[3] ≅ 0.13 / 0.30 && top.margins[1] ≅ 0.16
+    @test only(latex(top, "CMS")).size ≅ 0.75 * 0.05 * 600 / 420 && isempty(latex(bottom, "CMS"))
     @test top.axes["y"].label_size ≅ 0.05 * 600 / 420 && bottom.axes["x"].label_size ≅ 0.05 * 600 / 180
 
     # Comparison with ratio panel: luminosity text and annotation go through the label.
@@ -153,7 +235,7 @@ if TEST_NATIVE_ROOT
     c = only(with_axis_dump(dir -> render_root([cmp], [spec], joinpath(dir, "ratio"))))
     @test c.style[].name == "CMS"
     top = only(p for p in c.pads if p.name == "top0")
-    @test top.margins[4] ≅ 0.08 / 0.70 && top.margins[1] ≅ 0.16
+    @test top.margins[4] ≅ 0.05 / 0.70 && top.margins[1] ≅ 0.16
     @test length(latex(top, "CMS")) == 1 && length(latex(top, "138 fb^{-1} (13 TeV)")) == 1 && length(latex(top, "ee")) == 1
 
     # Hist2D COLZ: style margins, palette room on the right, label above the frame.
@@ -161,7 +243,8 @@ if TEST_NATIVE_ROOT
                    (collect(range(-1.0, 1.0; length=11)), collect(range(0.0, 1.0; length=11)))).hist
     c = only(with_axis_dump(dir -> render_root(xy, Graph2DSpec(style=:CMS), joinpath(dir, "colz"); draw="COLZ")))
     pad = only(framed(c))
-    @test pad.margins[1] ≅ 0.16 && pad.margins[2] >= 0.18 && pad.margins[3] ≅ 0.13
+    # cmsCanvas geometry of the 800x650 canvas (left/bottom/top), palette room on the right.
+    @test pad.margins[1] ≅ (87 + 0.78 * 50 - 60) * 650 / 600 / 800 && pad.margins[2] >= 0.18 && pad.margins[3] ≅ 0.145
     @test only(latex(pad, "CMS")).align == 11 && only(latex(pad, "CMS")).y > 1 - pad.margins[4]
 
     # 2x2 figure: one style for the canvas, a label in each pad that asks for one.
@@ -174,6 +257,8 @@ if TEST_NATIVE_ROOT
     @test [length(latex(p, "CMS")) for p in pads] == [1, 1, 1, 0]
     @test length(latex(pads[3], "Simulation")) == 1
     @test only(latex(pads[1], "CMS")).size ≅ 0.75 * pads[1].margins[4]
+    # Figure pads keep the setCMSStyle margins (no cmsCanvas geometry).
+    @test pads[1].margins ≅ (0.16, 0.02, 0.13, 0.05)
 
     # A titled COLZ palette fits its pad under every style: ROOT's TPaletteAxis
     # sits 0.005-0.05 pad widths right of the frame, its labels, "x10^n" exponent
@@ -292,7 +377,7 @@ end
             @test head.y ≅ line.y && line.align == 31 && line.x <= pad.palette[].x1
             # ATLAS: the 0.05 style top margin grows for the label.
             kind == :ATLAS && @test pad.margins[4] > 0.05 + 1e-3
-            kind == :CMS && @test pad.margins[4] ≅ 0.08
+            kind == :CMS && @test pad.margins[4] ≅ 0.07
         end
 
         # Figure pads: 1x2 (one row per pad) and 1x3 (too narrow: ATLAS stacks the lines).
@@ -450,4 +535,33 @@ end
         @test t.pad.axes["y"].title_offset > 0 && two_pad_ok(t, b, png)
     end
 end
+end
+
+@testset "CMS: the recommended long-y-title recipe keeps the title inside the canvas" begin
+    if TEST_NATIVE_ROOT
+        # cmsstyle's non-square default (y title offset 0.78, no extra space) is kept as is;
+        # docs/api.md recommends extra_space=0.05, y_title_offset=1.1 for longer y titles.
+        h = Hist1D(collect(0.0:10.0), [12.0, 30, 55, 80, 96, 99, 85, 60, 33, 14], fill(1.0, 10))
+        mktempdir() do dir
+            function left_ink(spec, name)
+                local png
+                pad = only(framed(only(with_axis_dump(d -> (png = render_root(h, spec, joinpath(dir, name); draw=:e1).png)))))
+                full = ROOTPlots.image_ink_bounds(png)
+                frame_left = floor(Int, pad.margins[1] * full.width) - 2
+                return (ink=ROOTPlots.image_ink_bounds(png; region=(0, 0, frame_left, full.height - 1)), pad=pad)
+            end
+            base = (xlabel="m_{ll} [GeV]", ylabel="Events / GeV", style=:CMS)
+            default = left_ink(GraphSpec(; base...), "default")
+            recipe = left_ink(GraphSpec(; base..., cms_label=(extra_space=0.05, y_title_offset=1.1)), "recipe")
+            @test recipe.pad.margins[1] ≅ (87 + 1.1 * 50 - 60) / 800 + 0.05      # ROOT stores Float32
+            @test recipe.pad.axes["y"].title_offset ≅ 1.1 && default.pad.axes["y"].title_offset ≅ 0.78
+            # Readable: the y title's ink starts several pixels inside the canvas, further in
+            # than with the default geometry.
+            @test recipe.ink.xmin >= 5
+            @test recipe.ink.xmin > default.ink.xmin
+            @info "CMS y title left ink (pixels)" default=default.ink.xmin recipe=recipe.ink.xmin
+        end
+    else
+        @test_skip false
+    end
 end

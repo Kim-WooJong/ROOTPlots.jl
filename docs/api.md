@@ -58,7 +58,7 @@ one = histogram([0.2, 0.4, 1.2], [0., 1., 2.]; weights=[1., 2., 1.]).hist
 two = histogram(([0.2, 0.4, 1.2], [0.3, 1.3, 1.4]), ([0., 1., 2.], [0., 1., 2.]);
                 weights=[1., 2., 1.], threads=:auto)
 render_root(two.hist, Graph2DSpec(draw=:heatmap), "output/h2"; format=:both)
-px = projection(two.hist, :x)  # sums visible bins; sumw2 is summed separately
+px = projection(two.hist, :x)  # sums visible bins; sumw2 is summed separately (flow=true: see below)
 
 stack = HistStack([one, one]; labels=["A", "B"], fill_colors=["#cc6677", "#4477aa"])
 render_root(stack, GraphSpec(xlabel="x", ylabel="Counts"), "output/stack")
@@ -84,6 +84,73 @@ weights. A true stack requires identical binning and non-negative contents;
 signed bins are only accepted with `draw="NOSTACK HIST"`. `PolygonHist2D`
 displays pre-aggregated values for simple polygons (convex or not; see
 [polygons](#non-convex-polygons)) and does not fill events.
+
+### Scaling, merging, and projections
+
+Julia owns histogram numbers, so these operations run in Julia (no ROOT process)
+and return new histograms with their own arrays; the inputs are never modified.
+They follow ROOT's `TH1::Scale`, `TH1::Add(h, 1)`/`TH1::Merge`, and
+`TH2::ProjectionX`/`TH3::Project3D`, with the differences listed below.
+
+```julia
+a = histogram(xa, edges).hist                    # independent samples
+b = histogram(xb, edges).hist
+total = merge(0.8 * a, 1.5 * b)                  # = one fill with weights 0.8 and 1.5
+half = a / 2                                     # a * inv(2), like Scale(1/2)
+px = projection(h2, :x; flow=true)               # integrated y flows included
+pzx = projection(h3, (:z, :x); flow=true)        # z on the x axis, x on the y axis
+```
+
+| Operation | Contents | Statistics |
+| --- | --- | --- |
+| `c * h`, `h * c`, `h / c` (finite `c`; `h / c` = `h * inv(c)`) | every bin incl. flows: `Σw·c`, `Σw²·c²` | moments: `Σw²` term ·c², others ·c (mean/std unchanged); `entries` unchanged |
+| `merge(a, b, more...)` (same type, identical edges) | every bin incl. flows: `Σw` and `Σw²` add | known `entries` add, known moments add; any unknown → unknown |
+| `projection(h, axis)` (default `flow=false`) | visible bins only, no flow bins | unknown (bin-centre moments, effective entries) |
+| `projection(h, axis; flow=true)` | integrated axes incl. flows; projected axes keep flows | exact original `entries`/moments if no integrated-axis flow cell under a visible result bin has `Σw ≠ 0` or `Σw² ≠ 0`; otherwise unknown |
+
+- **Scaling** equals a direct fill with every weight multiplied by `c` (up to
+  rounding). `c < 0` keeps the statistics (as ROOT); `0 * h` gives zero contents,
+  variances and moments with the fill count kept (ROOT `Scale(0)` also keeps the
+  entries and shows Mean = Std Dev = 0). Non-finite factors, `h / 0`, and Float64
+  overflow (also of `c²`) throw `ArgumentError`. Underflow is not checked: a
+  tiny factor (`c²` is subnormal below `abs(c) ≈ 1.5e-154` and zero below
+  `≈ 1.5e-162`) or tiny contents can round variances to reduced-precision values
+  or zero, as with ROOT's `Scale`. There is no normalization or
+  density helper: dividing by a data-dependent integral correlates the bins,
+  which per-bin `Σw²` cannot describe.
+- **Merging** is for **independent** samples and equals a direct fill of the
+  concatenated events. The same histogram passed twice (or histograms sharing
+  arrays) is rejected: to weight one sample twice use `2 * h` (`Σw²` scales by
+  4, not 2). Copies of overlapping samples cannot be detected; independence is
+  the caller's responsibility. Different edges are rejected: `rebin` both to
+  common edges first. For 2D/3D the result keeps `bins_with_flow` when any input
+  has it (missing flow bins are zero) and takes its visible bins from that
+  array. Signed weights simply add; cancelling bins keep growing `Σw²`, and the
+  effective entries then describe the signed sum, not an event count. There is
+  no subtraction: ROOT's `Add(h, -1)` resets the statistics, and the variance of
+  a difference of correlated samples is not `Σw²₁ + Σw²₂`.
+- **Projections.** `flow=false` keeps the earlier behaviour (visible bins only,
+  statistics unknown), which differs from ROOT's default `ProjectionX()` (that
+  sums the integrated axis' flow bins and may reuse the statistics). With
+  `flow=true` the result is a direct fill of the projected coordinates of all
+  events. Its statistics are exact when reused; the check is deliberately
+  conservative: a cell whose signed weights cancel (`Σw = 0`, `Σw² > 0`) still
+  drops them. Compared with ROOT 6.40.04 (plain macros): over its default full
+  range ROOT reuses the statistics only when the projection's total content
+  including its flow bins equals the in-range `Σw` (relative 1e-12), so (i) with projected-axis flows
+  ROOT shows bin-centre moments and effective entries where `flow=true` keeps
+  the exact ones, (ii) with cancelling signed weights in a flow cell ROOT keeps
+  its statistics where `flow=true` drops them, and (iii) in the fallback ROOT
+  sets in-range effective entries while the drawn result here gets
+  `TH1::ResetStats` effective entries, which in ROOT 6.40 include flow bins
+  (Mean and Std Dev agree). 3D → 2D projections reuse the matching moments and
+  cross term, reordered with the axes (`(:z, :x)` is ROOT's `Project3D("xz")`).
+  A `Hist2D`/`Hist3D` without `bins_with_flow` is taken to have empty flow
+  bins: `flow=true` sums zeros for them and reuses the stored statistics, which
+  is exact only if the source really had no flow content (`histogram` results
+  store their flows, so for them it is exact).
+
+See [recipes](recipes.md) for task-based examples.
 
 ### Mixed panels and annotations
 
@@ -296,9 +363,11 @@ results = rootmap(eachindex(datasets); workers=4) do i
 end
 ```
 
-- `rootmap(f, jobs; workers=Threads.nthreads(:default))` runs at most `workers`
-  Julia tasks on the default thread pool and returns results in **input order**.
-  `workers=1` runs sequentially.
+- `rootmap(f, jobs; workers=Threads.nthreads(:default), timeout=nothing)` runs at most
+  `workers` Julia tasks on the default thread pool and returns results in **input
+  order**. `workers=1` runs sequentially. `timeout` limits each native backend
+  process of the batch, and an interrupt cancels only this batch (see
+  [time limits and cancellation](#native-processes-time-limits-cancellation-formats-records)).
 - **Event filling:** `histogram(...; threads=:auto|:on|:off)` is Julia CPU
   multithreading with private accumulators and a fixed merge order.
 - **Fits and figures:** every ROOT call runs in its own C++ ROOT process, so ROOT
@@ -313,11 +382,179 @@ end
   outside a batch.
 - All inputs are attempted and workers are joined before returning. Failures are
   thrown as `RootMapError` whose `failures` hold `index => CapturedException` in
-  input order. Outputs completed earlier remain; a batch is not transactional.
+  input order; a failed ROOT process is a `RootBackendError` there, with that
+  job's native message (shown indented under its index). Outputs completed earlier remain; a batch is not transactional.
   Callers must still check each fit's `status/valid`.
 - Small jobs may not speed up because of process start-up cost. Limit `workers`
   according to per-job CPU/RAM use and nested histogram threading. No fixed
   speed-up is promised.
+
+## Native processes: time limits, cancellation, formats, records
+
+### Time limits
+
+Every native process the package starts runs under a wall-clock limit, read
+from the environment when the process starts:
+
+| process | variable | default |
+| --- | --- | --- |
+| ROOT backends: rendering, fits, profile/special-graph helpers, `root_styles`, image helpers | `ROOTPLOTS_BACKEND_TIMEOUT` | 600 s |
+| `root-config --version` / `--cflags --libs` (and `CXX --version` for records) | `ROOTPLOTS_ROOT_CONFIG_TIMEOUT` | 60 s |
+| C++ compilation of a backend (`build_root`, first use) | `ROOTPLOTS_COMPILE_TIMEOUT` | 600 s |
+
+A value is a positive number of seconds (`"120"`, `"2.5"`); `"0"` or `"none"`
+disables the limit; unset or empty means the default. Any other value is an
+`ArgumentError` before a process starts. A process that exceeds its limit is
+stopped and reported as `RootBackendError` with `timedout == true`, `timeout` (the
+limit in seconds), the signal that ended it in `termsignal`, and the native
+standard error written so far:
+
+```text
+RootBackendError: native ROOT backend failed during graph rendering (request DRAW): timed out after 600 s; stopped by signal 15 (SIGTERM)
+```
+
+How a process is stopped (on a time limit, or when the Julia task waiting for it
+is interrupted):
+
+- **POSIX (macOS, Linux):** the process is started detached, as the leader of its
+  own process group (session); the package checks that its group id is its own
+  pid and differs from Julia's group before signalling. It sends SIGTERM to that
+  group, waits up to 2 s, sends SIGKILL to the group if any member is left, and
+  reaps the direct child. Julia's own process group is never signalled. Because
+  the child has its own session, a terminal Ctrl-C reaches Julia only; the
+  package then stops the processes it is waiting for.
+- **Windows (not validated):** only the direct child is terminated; processes it
+  started may survive.
+- Descendants that keep the process's output streams open 2 s after it exited
+  are stopped the same way (with a warning); the result of the run is kept.
+- Standard input is `devnull`; standard error is read while the process runs
+  (no pipe deadlock with large output) and, after success, forwarded to Julia's
+  `stderr` (verbatim up to 64 MiB). Pipes are closed on every path.
+- The limit covers native processes only. Julia code, such as validation,
+  request writing, or a `rootmap` callback that loops or blocks, is not timed
+  out. If Julia itself is killed (SIGKILL), its children are not stopped.
+
+### rootmap: per-batch limit and cancellation
+
+```julia
+results = rootmap(datasets; workers=4, timeout=120) do data
+    fit_root(data, :pol1; initial=[0., 1.])
+end
+```
+
+- `timeout` (seconds; `Inf` = no limit; default `nothing` = the enclosing
+  batch's limit, else `ROOTPLOTS_BACKEND_TIMEOUT`) is fixed when the batch starts
+  and reaches its worker tasks through a scoped value (Julia 1.11
+  `Base.ScopedValues`). It applies to each ROOT backend process of the batch;
+  compilation and `root-config` keep their own limits. Other renders, including
+  concurrent batches, are not affected. A nested `rootmap` inherits the outer
+  limit unless it passes its own. `0`, negative and `NaN` are rejected.
+- A job whose backend exceeds the limit is an ordinary failure: the other jobs
+  continue, and `RootMapError` lists it at its input index with the
+  `RootBackendError` (`timedout=true`, native stderr kept).
+- **Interruption** (an `InterruptException` while `rootmap` waits, e.g. Ctrl-C, or
+  one raised inside a job) cancels that invocation: no further job starts, the
+  native processes started by its jobs (including nested batches) are stopped as
+  above and reaped, all workers are joined, and the `InterruptException` is
+  rethrown (no `RootMapError`). Each invocation owns an explicit registry of its
+  live processes: a process is registered when it starts (under the scope lock,
+  so a cancelled scope starts nothing) and removed when it has been reaped.
+  Native processes of other batches or of calls outside the batch are never
+  touched.
+- Joining waits for running callbacks to return; a callback blocked in Julia
+  code keeps the batch waiting (a second interrupt stops the wait).
+
+### Output formats
+
+`format=:png` (default), `:pdf` or `:both` is passed to the native renderer
+(`--formats=png`, `pdf`, `png,pdf`), which writes only the requested files:
+`format=:png` no longer pays for a PDF that was written and discarded. All
+image routes use one native `save_outputs` (graphs, histograms, figures, profiles,
+TF2/TF3, comparisons). The PNG is the same image as the PNG of a `:both` run, and
+the PDF equals the `:both` PDF apart from ROOT's info dictionary (creation
+date). ROOT stores the file name it saved as the PDF `/Title`: the renderer runs
+in a private temporary directory with the relative stem `rendered`, so every
+package PDF has the title `rendered.pdf` and contains no directory path. (The
+native executables called directly keep ROOT's behaviour: an absolute output stem
+becomes an absolute title.) The returned `(; png, pdf)` is unchanged:
+an unrequested format is `nothing` and no such file is created. Calling an
+executable without the option (legacy three-argument form) still writes both
+files; an unknown option or format is a usage error with exit code 2 and no
+output. Fits and numerical helpers are unaffected.
+
+### Reproducibility records (opt-in)
+
+Every `render_root` method accepts `provenance=false`. With `provenance=true`,
+after a successful rendering the package also writes, next to the images:
+
+- `<stem>.request.tsv`: the exact request sent to the native renderer, byte
+  for byte. It contains the data inline (bins, points, every panel of a figure,
+  labels); no other file is needed to replay it.
+- `<stem>.provenance.toml` (written with Julia's TOML standard library):
+
+```toml
+record = "ROOTPlots provenance 1"
+[backend]       # executable = "rootplots-graphfit" | "rootplots-render", key = cache key, operation
+[compiler]      # name = "c++", version = first line of "c++ --version"
+[julia]         # version
+[outputs]       # formats = ["png"]; [outputs.png] file = "<stem>.png", sha256 = "..."
+[request]       # file, sha256, kind (first request record), style (ROOT style or "")
+[root]          # version (root-config --version)
+[rootplots]     # version (package), protocol (request header)
+[system]        # kernel, arch, machine (Julia's Sys.KERNEL, Sys.ARCH, Sys.MACHINE)
+```
+
+The return value then is `(; png, pdf, request, provenance)` (paths; `png`/`pdf`
+as without records). Without `provenance=true` nothing changes: same return
+value, no extra file.
+
+The record holds file names, versions and digests only: no directory paths
+(output, cache, `root-config`, compiler), no compiler or ROOT flags, no host or
+user name, and no environment. Absolute paths in the compiler's version line are
+reduced to their file names. **The request file is user data:** labels, titles
+and numbers are kept verbatim (they are what was drawn), so a request can be as
+sensitive as the plot's input. Records are only written when requested, and
+both files are created readable by the owner only (mode 0600 on POSIX). They
+are written to temporary files in the output directory and renamed after the
+images were moved; a failed rendering writes no record, and a failure while
+writing either file removes its temporary file. The two renames are each atomic
+but not as a pair: if the second fails, the request file is already in place
+without its record (the error is rethrown). Records of an earlier
+run are not deleted by a later run without `provenance=true`; the output digests
+tell which images a record belongs to. The PDF's title is `rendered.pdf` (see
+Output formats); the record does not contain it.
+
+Replay a record with the compiled backend and any format:
+
+```julia
+using ROOTPlots, TOML
+built = build_root()
+record = TOML.parsefile("figure.provenance.toml")
+exe = record["backend"]["executable"] == "rootplots-render" ? built.renderer : built.graphfit
+basename(dirname(exe)) == record["backend"]["key"] || @warn "different backend build"
+run(`$exe figure.request.tsv replayed --formats=png`)   # writes replayed.png
+```
+
+With the same package version, ROOT installation and fonts, the replayed PNG is
+byte-identical to the recorded one (tested); a replayed PDF's SHA-256 differs from
+the recorded one, because ROOT writes the creation date and the output file name
+(`replayed.pdf` above, `rendered.pdf` in package output) into it. The request protocol is internal and tied to the package version
+(`rootplots.version`, `backend.key`): replay with that version, not a newer one.
+Environment hooks such as `ROOTPLOTS_AXIS_DUMP` or `ROOTPLOTS_ROOT_VERBOSE` are not
+recorded (they do not change the image).
+
+### root-config metadata cache
+
+`root-config --version` and `--cflags --libs` run once per session and
+installation: the result is cached per `root-config` file identity (the path used,
+its real path, device, inode, size and modification time), so another
+installation, another path to it, or an edited `root-config` is queried again. One
+metadata lock prevents duplicate concurrent queries; cache hits and queries do
+not take the build lock. Every backend lookup still hashes the backend sources
+and headers and resolves `CXX`, so an edited source or another compiler selects
+another build. The cache does not notice ROOT libraries replaced behind an
+unchanged `root-config`: `build_root(force=true)` queries `root-config` again and
+recompiles. (`ROOTPlots.clear_backend_cache!()` forgets the cached metadata; internal.)
 
 ## Binning and data/model comparisons
 
@@ -409,8 +646,10 @@ render_root([curve, observed], GraphSpec(xlabel="x", ylabel="Response", legend=:
 `xerrors`/`yerrors` accept a symmetric vector, `(low=…, high=…)`, or `BinErrors`;
 errors are non-negative **magnitudes**. Connected lines follow input order and
 are never sorted or interpolated automatically. `xlimits`/`ylimits` in `GraphSpec`
-are physical coordinates, and `logx`/`logy` are independent. On log axes, the
-centers and the displayed error endpoints must be positive. A standalone call
+are physical coordinates, and `logx`/`logy` are independent. On log axes the
+point centres must be positive; an error bar that reaches zero or below is drawn
+and clipped at the frame edge by ROOT's graph painter, and the automatic range
+follows the bar's positive part. A standalone call
 writes a single pad; use `PlotPanel/PlotFigure` for multiple pads.
 
 `fit_root` runs ROOT's `TH1::Fit`/`TGraph::Fit` and returns a `FitResult` with
@@ -420,7 +659,11 @@ parameters, standard errors, the full covariance, status, validity, `chi2`,
 the two edge models below. `initial` is required and follows ROOT's parameter
 order. `bounds=[nothing, (low, high), ...]`, `fixed=[1, ...]`, and
 `range=(low, high)` are optional. `fit_curve` samples the returned parameters
-for display; it is not a confidence band.
+for display; it is not a confidence band. `fit_root` uses only the numbers of a
+`GraphSeries` (points, errors) and checks its options and style; the `label` is
+presentation text that the fit ignores, so any label (also text ROOT cannot draw)
+can be fitted. Drawing the series translates the label and rejects characters
+TLatex cannot draw.
 
 | Model | Parameter order (1-based) | Function |
 |---|---|---|
@@ -466,7 +709,7 @@ render_root([observed], spec, "output/profile"; format=:both)
 - `PlotText` uses **NDC coordinates** by default; `ndc=false` uses data
   coordinates. `font`, `size`, `color`, `align`, and `angle` are configurable.
   Math uses ROOT TLatex syntax (`#sigma`, `#pm`, `#mum`, `mm^{2}`), not a full
-  LaTeX engine.
+  LaTeX engine. Unicode text is translated to TLatex (see "Unicode labels" below).
 - An automatic legend (`legend=:topright` etc.) uses a fixed text size of
   0.035 of the pad (ROOT's default axis label size) and a box sized from its
   entries, so its text matches the axis labels in single canvases and figure
@@ -638,9 +881,15 @@ files = render_root(h, fit, GraphSpec(xlabel="Mass", ylabel="Events"),
 ```
 
 This overload draws **two pads with a shared x axis**: the visible bins and fit
-curve on top, and valid χ² pulls below. The default x range is the histogram's
-outer edges (override with `GraphSpec.xlimits`). `logy` does not apply to the pull
-pad. Specify `pull_limits=(low, high)` or use the automatic range that contains
+curve on top, and valid χ² pulls below. The bins are a native `TH1D` drawn with
+`E1 X0` (markers and error bars with caps, no bin-width x bars), so ROOT's TH1
+rules apply: empty bins are not drawn, and with `logy` bins below the frame are
+skipped and error bars reaching zero (e.g. a bin with one entry) are clipped at
+the frame. The automatic log range follows the drawn bins (the fit curve may
+raise the maximum and is clipped below the data); a log axis without any
+positive bin, or with non-positive `ylimits`, is an `ArgumentError`. The default
+x range is the histogram's outer edges (override with `GraphSpec.xlimits`). `logy`
+does not apply to the pull pad. Specify `pull_limits=(low, high)` or use the automatic range that contains
 all valid pulls and zero. `FitResult` does not store the identity of its data, so
 pass **the fit obtained from the same `Hist1D`**. Poisson likelihood fits are not
 supported in this figure. `scripts/histogram_fit_demo.jl` shows DataFrame
@@ -713,10 +962,16 @@ which are filled into ROOT's under/overflow bins. The box therefore matches a
 ROOT histogram filled event by event. A `Hist1D`/`Hist2D`/`Hist3D` built
 directly from bin contents has `entries === nothing` and no moments: ROOT then
 shows the **effective entries** `(Σw)²/Σw²` (`TH1::ResetStats`) and bin-centre
-moments, as for any ROOT histogram whose fill history is unknown. Pass
+moments, as for any ROOT histogram whose fill history is unknown (ROOT 6.40's
+`ResetStats` counts the under/overflow bins in these effective entries).
+Supplied `moments` without `entries` keep the unbinned Mean/Std Dev, and
+Entries is the same ROOT-computed effective value, not a fill count. Pass
 `entries=…`, `moments=…`, `underflow=…`, `overflow=…` (or `bins_with_flow=…`
 for 2D/3D) to the constructors to supply them. `rebin` keeps them (like
-`TH1::Rebin`); `projection` returns plain visible-bin histograms. With
+`TH1::Rebin`); scaling and `merge` carry them (see
+[scaling, merging, and projections](#scaling-merging-and-projections)); `projection`
+returns plain visible-bin histograms unless `flow=true` makes exact statistics
+available. With
 explicit `xlimits` on a raw-option histogram, ROOT recomputes the statistics
 from the bins inside the range.
 
@@ -867,16 +1122,36 @@ style's attributes, while explicit settings applied afterwards keep their values
   panels that name a style must agree. `PlotFigure(...; style=:CMS)` gives the
   style to every panel spec without one.
 
-**CMS.** ROOT has no built-in CMS style. `style=:CMS` creates a `"CMS"` `TStyle` in the
-backend from ROOT setters, with values that follow the public CMS publication
-style conventions: white canvas, pads and frame without borders; no statistics,
-title, date or file boxes; Helvetica (font 42) for all text; axis title size
-0.06 (x offset 0.9, y offset 1.25), label size 0.05 (offset 0.007); ticks on all
-four frame sides (`SetPadTickX/Y(1)`), tick length 0.03, 510 divisions; pad margins
-top 0.08, bottom 0.13, left 0.16, right 0.04; markers 20, function line width 2,
-end-error size 2. The palette is the package's `palette` option (viridis by
-default). In the comparison view, y-axis numbers use an exponent above 999
-(`TAxis::SetMaxDigits(3)`; `yaxis=AxisStyle(max_digits=...)` overrides).
+**CMS.** The reference is the CMS Collaboration's cmsstyle package
+(https://github.com/cms-cat/cmsstyle, `cmsstyle.py` at upstream commit
+`ecfed5a18a7a8da5e49bfce903e40e0f5769c4f1`). ROOT has no built-in CMS style;
+`style=:CMS` creates a `"CMS"` `TStyle` in the backend from ROOT setters with
+cmsstyle's `setCMSStyle` values: white canvas, pads and frame without borders; no
+statistics, title, date or file boxes; Helvetica (font 42); axis title size 0.06
+(offsets x 1.1, y 1.35), label size 0.05 (offset 0.012); ticks on all four frame
+sides, tick length 0.03, 510 divisions; pad margins top 0.05, bottom 0.13, left 0.16,
+right 0.02; markers 20 (size 1), function line width 1, end-error size 2; legends
+font 42, text size 0.04, no border; hatch line width 2, spacing 1.3. The palette is
+the package's `palette` option (viridis by default). In the comparison view, y-axis
+numbers use an exponent above 999 (`TAxis::SetMaxDigits(3)`; `yaxis=AxisStyle(max_digits=...)`
+overrides).
+
+**cmsCanvas geometry.** Single-pad canvases under `style=:CMS` (graphs, 1-D/2-D
+histograms, functions, special graphs, one-panel figures) take cmsstyle's
+`cmsCanvas` margins and frame title offsets: in pixels of the canvas height H (cmsCanvas
+uses H = 600 and W = 600 for `square=true`, 800 otherwise) top 0.07 H, bottom
+0.125 H (+0.02 of the pad), right 0.05 H, left 0.145 H adjusted for the y title
+offset o (+50 o - 60 px for o < 1.5, +35 (o - 1.4) + 25 px for 1.5 <= o < 1.8,
+in 600-pixel units) plus `extra_space`; x title offset 1.05, y title offset o
+(default 1.2 on a square canvas, 0.78 otherwise). cmsCanvas's `square` is the
+canvas `size`: `size=(600, 600)` is `square=true`, the default `(800, 600)` is
+`square=false`; other sizes scale the pixel lengths with H. The non-square default
+o = 0.78 suits short y labels only (the y title of a three-digit axis overlaps its
+labels and reaches the canvas edge, as with cmsstyle); for longer labels give
+`y_title_offset` together with `extra_space`, e.g. 1.1 and 0.05 on 800x600 (a larger
+offset alone moves the title further left than the margin grows, as in cmsstyle). Two-pad views (fit/pull, comparison), multi-panel figures and
+3-D views keep the `setCMSStyle` margins with the package's layout rules. Explicit
+`CanvasStyle` margins and `AxisStyle` offsets win.
 
 The single switch is `style=:CMS`: it also draws the default label
 "CMS Preliminary". `cms_label` refines or removes it:
@@ -885,21 +1160,54 @@ The single switch is `style=:CMS`: it also draws the default label
 |---|---|
 | `nothing` (default) | label "CMS" + "Preliminary" when `style=:CMS`, otherwise none |
 | `false` / `true` | no label / default label (with any style) |
-| `(extra=..., lumi=..., energy=..., position=...)` | fields below |
+| NamedTuple | the cmsstyle options below |
 
-- `extra`: text after "CMS" (default `"Preliminary"`; e.g. `"Simulation"`, `"Private Work"`;
-  `""` for none), in italics (font 52), 0.76 x the "CMS" size.
-- `lumi`, `energy`: text above the frame on the right, `"lumi (energy)"`, e.g.
-  `cms_label=(lumi="138 fb^{-1}", energy="13 TeV")` gives "138 fb^{-1} (13 TeV)";
-  `energy` alone gives "(13 TeV)". A comparison panel's `lumi` is used when neither
-  is given.
-- `position`: `:inside_left` (default for 1-D plots; "CMS" bold, font 61, inside the
-  frame at the top left with the extra text below it), `:inside_right`, or `:outside`
-  ("CMS" and the extra text on one line above the frame at the left; the default
-  for 2-D/3-D views so the label does not cover coloured cells).
-- Sizes follow the CMS convention of scaling with the pad's top margin: "CMS" is
-  0.75 x the top margin, the luminosity text 0.6 x. In figure pads they scale with
-  each pad; in the upper pad of a two-pad view they keep their one-pad size.
+| Key | cmsstyle | Meaning |
+|---|---|---|
+| `extra` | `SetExtraText` | text after/below "CMS" (default `"Preliminary"`; nicknames `"p"`, `"s"`, `"su"`, `"wip"`, `"pw"`; `""` for none), italics (font 52), 0.76 x the "CMS" size. A text containing "Private" drops the "CMS" text, as in cmsstyle |
+| `lumi`, `energy` | `SetLumi`, `SetEnergy` | text above the frame on the right, `"lumi (energy)"`, e.g. `(lumi="138 fb^{-1}", energy="13 TeV")`; `energy` alone gives `"(13 TeV)"`. A comparison panel's `lumi` is used when no right text is given |
+| `right` | (the luminosity text) | free text at the luminosity position instead of `lumi`/`energy`, e.g. `"University of Seoul"` |
+| `position` | `iPos` | `:inside_left`/`11` (default for 1-D), `:inside_center`/`22`, `:inside_right`/`33`, `:outside`/`0` ("CMS" and the extra text on one line above the frame at the left; the default for 2-D/3-D views) |
+| `additional_info` | `AppendAdditionalInfo` | string or vector of strings: lines below the label (font 42, extra-text size) |
+| `cms_text` | `SetCmsText` | the "CMS" text (`""` for none) |
+| `scale_lumi` | `scaleLumi` | luminosity-text size factor (default 1) |
+| `extra_space` | `cmsCanvas(extraSpace)` | added to the left margin (needs `style=:CMS`) |
+| `y_title_offset` | `cmsCanvas(yTitOffset)` | y title offset and left-margin adjustment (needs `style=:CMS`) |
+
+Label geometry is cmsstyle's `CMS_lumi` (t = the pad's top margin): "CMS" bold
+(font 61) at 0.75 t; luminosity/right text (font 42) at 0.6 t x `scale_lumi`,
+right-aligned at 1 - r, baseline at 1 - t + 0.2 t; inside positions start 0.035 of
+the frame from its top and side (alignment 13/23/33), the extra text 1.2 x 0.75 t
+lower, additional lines 0.004 + k (0.6 x 0.76 x 0.75 t + 0.02) below the extra text;
+outside, "CMS" starts at the frame's left edge and the extra text at cmsstyle's
+offset 0.043 x 52 x 0.75 t x H/W (W > H). In figure pads sizes scale with each
+pad; in the upper pad of a two-pad view they keep their one-pad size.
+
+Deviations from cmsstyle kept on purpose: `SetOptFit(1)` is not applied (the
+package's fit boxes are opt-in), no `gROOT->ForceStyle` and no
+`TColor::DefinedColors`; the style also sets text font 42 / size 0.05 for TLatex
+without explicit attributes; label sizes are capped at a top margin of 0.1; with the
+outside position cmsstyle ignores additional-info lines (with a warning), here they
+are drawn inside the frame at the top left; the CMS logo image (`SetCmsLogoFilename`)
+and `cmsDiCanvas`/`cmsMultiCanvas` geometries are not provided.
+
+Example (ME0 aging stability figure, cmsstyle `cmsCanvas(square=false, iPos=0,
+extraSpace=0.05, yTitOffset=1.1)`):
+
+```julia
+points = GraphSeries(charge, gain; label="Measurement",
+                     style=GraphStyle(marker_style=20, marker_size=1.1))   # no errors: markers only
+mean_line = PlotLine(0.0, mean_gain, 13.0, mean_gain; width=2, style=2,
+                     label="Mean = 6.14 #times 10^{4}")
+spec = GraphSpec(xlabel="Integrated charge [C/cm^{2}]", ylabel="T/P-corrected effective gain",
+                 xlimits=(0.0, 13.0), ylimits=(5e3, 1e6), logy=true,
+                 lines=[mean_line],
+                 legend_spec=LegendSpec(bounds=(0.62, 0.75, 0.94, 0.88), text_size=0.04),
+                 style=:CMS,
+                 cms_label=(position=:outside, extra="p", right="University of Seoul",
+                            extra_space=0.05, y_title_offset=1.1))
+render_root([points], spec, "gain_stability"; format=:both)
+```
 
 **ATLAS.** `style=:ATLAS` selects ROOT's built-in `"ATLAS"` style unchanged.
 `atlas_label=(text="Internal", energy="13 TeV", lumi="140 fb^{-1}")` draws
@@ -944,8 +1252,44 @@ The two native bridges are compiled with ROOT's `root-config --cflags --libs` an
 stored in the Julia depot's Scratch cache; the package source is never written.
 Paths and values are passed as argument arrays and an explicit text protocol,
 never evaluated as ROOT macros. No `.root` files are created. ROOT's `TLatex`
-interprets `#`, `_`, and `^`; `μ` and `ℓ` are converted to `#mu` and `#ell`. Pixel
-identity across Unicode text, fonts, or operating systems is not guaranteed.
+interprets `#`, `_`, and `^`. Pixel identity across fonts or operating systems is
+not guaranteed.
+
+**Unicode labels.** ROOT's TLatex does not draw UTF-8 text (batch PNGs show
+mojibake), so every text sent to ROOT (titles, axis titles, legend entries,
+statistics-box headers, `PlotText`, `PlotLine` labels, CMS/ATLAS label texts,
+bin labels, `LabelChange` texts, comparison-panel texts, time formats) is
+translated to TLatex in Julia. ASCII text, including ROOT's own `#` syntax, is
+sent unchanged, also next to translated characters (`"#sigma_{m} [GeV/c²]"` →
+`"#sigma_{m} [GeV/c^{2}]"`, `"Δ#phi"` → `"#Delta#phi"`). Translated: all upper/lower-case Greek letters (`σ` → `#sigma`,
+`Δ` → `#Delta`, also `µ ϵ ϑ ϖ ς ϕ ϒ`); superscript/subscript digits, signs,
+parentheses and common letters as one group (`GeV/c²` → `GeV/c^{2}`, `x⁻¹` →
+`x^{-1}`, `H₂O` → `H_{2}O`); `± ∓ × ÷ · • ° − ≤ ≥ ≠ ≈ ≡ ∝ ∼ … ∞ ∂ ∇ √ ∑ ∏ ∫ ∀ ∃ ∈
+∉ ⊂ ⊆ ⊃ ⊇ ⊄ ∩ ∪ ∧ ∨ ∅ ⊗ ⊕ ⊙ ⊥ ∥ ∠ ⟨ ⟩ □ ℏ ħ ℵ ℑ ℜ ℘ ♣ ♦ ♥ ♠ © ® ™ Å å`; the arrows
+`← → ↑ ↓ ↔ ⇐ ⇒ ⇑ ⇓ ⇔ ↵`; `ℓ` (as ROOT's usual `#font[12]{l}`); accented letters
+(`é ü x̄ ŷ ẋ p⃗` → `#acute{e}`, `#ddot{u}`, `#bar{x}`, `#hat{y}`, `#dot{x}`, `#vec{p}`);
+typographic dashes, quotes, primes and non-breaking spaces (to ASCII). So
+`"σ_m [GeV/c²] → Δφ"` reaches ROOT as `"#sigma_m [GeV/c^{2}] #rightarrow #Delta#phi"`.
+Any other non-ASCII character (e.g. Hangul or CJK text, emoji) is an
+`ArgumentError` naming the character, raised before ROOT runs (when drawing;
+`GraphSeries` accepts such labels and `fit_root` ignores them); write such text
+with ROOT's `#` syntax or in ASCII. As a safety net, a request file that still
+contains non-ASCII text is refused before the process starts.
+
+**Native failures.** A failed ROOT process (non-zero exit or a signal) is
+thrown as `RootBackendError` with `operation` (e.g. `"fit/pull rendering"`), the
+request kind (`"DRAWFIT"`), the executable, `exitcode`, `termsignal`, and the
+process's `stderr` text (ROOT's `Error in <...>` lines and the bridge's own
+message; very long output keeps its first and last 32 KiB). Earlier versions
+threw `Base.ProcessFailedException` and printed the message only to the
+terminal. Standard error is read concurrently, so large output cannot block a
+process; after a successful run it is written to Julia's `stderr`, so warnings
+stay visible. Compiler failures (`build_root`, automatic builds) and
+`root-config` failures are `RootBackendError`s too (`executable` = the compiler or
+`root-config` file name; was `ProcessFailedException`), and every process runs
+under a time limit (`timedout`, `timeout`; see
+[time limits](#native-processes-time-limits-cancellation-formats-records)). `fit_root` rejects more than 1,000,000
+histogram bins or graph points in Julia, as the native fit does.
 
 **ROOT messages.** Each native process sets ROOT's `gErrorIgnoreLevel` to
 `kWarning`, so routine `Info in <TCanvas::Print>: ... has been created` lines
@@ -985,7 +1329,7 @@ render_root(h, spec, "output/spectrum"; draw="E1")
 | `decimals` | `TAxis::SetDecimals` | 1.0 instead of 1 next to 0.5 |
 | `center_title`, `center_labels` | `TAxis::CenterTitle`, `TAxis::CenterLabels` | |
 | `time_display`, `time_format` | `TAxis::SetTimeDisplay`, `TAxis::SetTimeFormat` | strftime format; ROOT's `%F` offset syntax is accepted |
-| `time_offset` | `TAxis::SetTimeOffset(t, "gmt")` | UNIX time (s) of axis value 0, always GMT for reproducible output |
+| `time_offset` | `TAxis::SetTimeOffset(t, "gmt")` | UNIX time (s) of axis value 0, always GMT for reproducible output; `abs(t) < 2^31` (ROOT 6.40 keeps 32-bit seconds: larger offsets print wrongly, huge ones crash ROOT) |
 | `exponent_offset` | `TGaxis::SetExponentOffset(dx, dy, "x"/"y")` | static in ROOT: one value per direction per canvas (conflicts are rejected) |
 | `bin_labels` | `TAxis::SetBinLabel(bin, label)` | histogram bin axes only; strings (bins 1, 2, …), `bin => label` pairs, or a Dict |
 | `labels_option` | `TAxis::LabelsOption("h"/"v"/"u"/"d")` | orientation of bin labels; needs `bin_labels` |
@@ -1129,5 +1473,6 @@ append, just before the image is saved, each pad's ROOT state (`GetLogx/y/z`,
 `GetGridx/y`, `GetTickx/y`, margins, the "title" box text and attributes) and the
 frame axes as ROOT reports them (`GetNdivisions`, `GetMaxDigits`, `GetNoExponent`,
 `GetMoreLogLabels`, `GetDecimals`, `GetTicks`, `GetTimeDisplay`/`GetTimeFormat`, colours,
-sizes, bin labels, `ChangeLabel` entries). `test/axis_format_tests.jl` checks these
+sizes, bin labels, `ChangeLabel` entries), TLatex texts, and legends (`LEGEND` box and
+`LEGENTRY` label/option rows). `test/axis_format_tests.jl` checks these
 values; `scripts/axis_format_demo.jl` draws every option.

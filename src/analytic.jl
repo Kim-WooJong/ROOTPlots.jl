@@ -237,8 +237,8 @@ function write_analytic_spec(path, v::ModelVolume, spec)
 end
 
 render_root(s::Union{ModelSurface,ModelVolume}, spec::Union{Graph2DSpec,Graph3DSpec}, outstem::AbstractString;
-            format=:png, root_config=nothing) =
-    render_root(PlotPanel(s, spec), outstem; format, root_config)
+            format=:png, provenance::Bool=false, root_config=nothing) =
+    render_root(PlotPanel(s, spec), outstem; format, provenance, root_config)
 
 """
     function_grid(f, xrange, yrange; n=(60, 60)) -> Grid2D

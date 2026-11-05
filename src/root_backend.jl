@@ -24,9 +24,6 @@ function clean_field(value::AbstractString)
     return value
 end
 
-"""Translate the Greek characters used in panel labels into ROOT's TLatex spelling."""
-root_latex(value::AbstractString) = replace(String(value), "μ" => "#mu", "ℓ" => "#ell")
-
 """The one ROOT style named by the comparison panels (all must agree), or nothing."""
 function comparison_style(specs)
     styles = [s.style for s in specs if s.style !== nothing]
@@ -52,9 +49,9 @@ function write_root_spec(path::AbstractString, cmps::AbstractVector{Comparison},
         root_style === nothing || println(io, "ROOTSTYLE\t", String(root_style))
         for (panel_id, (cmp, spec)) in enumerate(zip(cmps, specs))
             n = length(cmp.data.sumw)
-            println(io, join(("PANEL", panel_id, clean_field(root_latex(spec.xlabel)),
-                              clean_field(root_latex(spec.ylabel)), clean_field(root_latex(spec.annotation)),
-                              clean_field(root_latex(spec.lumi)), clean_field(root_latex(cmp.uncertainty_label)), n), '\t'))
+            println(io, join(("PANEL", panel_id, root_text(spec.xlabel),
+                              root_text(spec.ylabel), root_text(spec.annotation),
+                              root_text(spec.lumi), root_text(cmp.uncertainty_label), n), '\t'))
             limits = panel_limits(cmp, spec, ratio_limits)
             println(io, join(("AXIS", panel_id, Int(spec.logx), Int(spec.logy),
                               Int(spec.ratio_logy), limits.ymin, limits.ymax,
@@ -81,7 +78,7 @@ function write_root_spec(path::AbstractString, cmps::AbstractVector{Comparison},
                                   Int(valid)), '\t'))
             end
             for (j, component) in enumerate(cmp.components)
-                println(io, join(("COMP", panel_id, j, clean_field(root_latex(component.label)),
+                println(io, join(("COMP", panel_id, j, root_text(component.label),
                                   component.color, component.hist.sumw...), '\t'))
             end
         end
@@ -101,7 +98,7 @@ function image_difference(reference::AbstractString, candidate::AbstractString; 
     config = find_root_config(root_config)
     config === nothing && throw(ArgumentError("local native ROOT not found"))
     exe = graphfit_executable(config)
-    fields = split(strip(read(Cmd([exe, "--image-diff", String(reference), String(candidate)]), String)), '\t')
+    fields = split(strip(run_backend(Cmd([exe, "--image-diff", String(reference), String(candidate)]); operation="image comparison", capture=true)), '\t')
     if first(fields) == "SIZE"
         return (; same_size=false, width=parse(Int, fields[2]), height=parse(Int, fields[3]),
                 max=Inf, mean=Inf, changed_fraction=1.0)
@@ -122,7 +119,7 @@ function image_colored_fraction(path::AbstractString; root_config=nothing)
     config = find_root_config(root_config)
     config === nothing && throw(ArgumentError("local native ROOT not found"))
     exe = graphfit_executable(config)
-    fields = split(strip(read(Cmd([exe, "--image-chroma", String(path)]), String)), '\t')
+    fields = split(strip(run_backend(Cmd([exe, "--image-chroma", String(path)]); operation="image colour measurement", capture=true)), '\t')
     first(fields) == "CHROMA" && length(fields) == 4 || error("unexpected image colour output")
     return parse(Int, fields[4]) / (parse(Int, fields[2]) * parse(Int, fields[3]))
 end
@@ -141,60 +138,144 @@ function image_ink_bounds(path::AbstractString; region=nothing, root_config=noth
     exe = graphfit_executable(config)
     args = region === nothing ? String[] : string.(Int.(collect(region)))
     length(args) in (0, 4) || throw(ArgumentError("region must be (x0, y0, x1, y1)"))
-    fields = split(strip(read(Cmd([exe, "--image-ink", String(path), args...]), String)), '\t')
+    fields = split(strip(run_backend(Cmd([exe, "--image-ink", String(path), args...]); operation="image ink measurement", capture=true)), '\t')
     first(fields) == "INK" && length(fields) == 7 || error("unexpected image ink output")
     v = parse.(Int, fields[2:7])
     return (; width=v[1], height=v[2], xmin=v[3], ymin=v[4], xmax=v[5], ymax=v[6])
 end
 
 const ROOT_BUILD_LOCK = ReentrantLock()
+# root-config/compiler metadata: separate from the build lock, so cached lookups
+# and queries never wait for a compilation.
+const ROOT_METADATA_LOCK = ReentrantLock()
+const ROOT_METADATA = Dict{Tuple,NamedTuple}()
+const COMPILER_VERSIONS = Dict{Tuple,String}()
 
 # Initialized on first build, not at package precompilation time. Scratch owns
 # cache lifecycle and keeps all writes outside the (possibly read-only) source.
 root_cache_dir() = @get_scratch!("native-backends")
 
+"""Cache key of an executable file: the selected path, its real path, and its device, inode, size and mtime."""
+function executable_identity(path::AbstractString)
+    real = realpath(path)
+    info = stat(real)
+    return (String(path), real, info.device, info.inode, info.size, info.mtime)
+end
+
+"""
+    root_config_metadata(config; force=false)
+
+`root-config --version` and `--cflags --libs` of one installation (internal),
+cached per [`executable_identity`](@ref) of the `root-config` file: a replaced or
+edited `root-config`, or another path to it, is queried again. The cache does not
+notice changes to the ROOT libraries themselves; `force=true` (used by
+`build_root(force=true)`) queries again. Queries run under
+`ROOTPLOTS_ROOT_CONFIG_TIMEOUT` (default 60 s); one lock prevents duplicate queries.
+"""
+function root_config_metadata(config::AbstractString; force::Bool=false)
+    id = executable_identity(config)
+    lock(ROOT_METADATA_LOCK) do
+        if !force
+            cached = get(ROOT_METADATA, id, nothing)
+            cached === nothing || return cached
+        end
+        real = id[2]
+        limit = root_config_timeout()
+        version = strip(run_backend(Cmd([real, "--version"]); operation="root-config --version",
+                                    capture=true, timeout=limit))
+        flags = Base.shell_split(strip(run_backend(Cmd([real, "--cflags", "--libs"]);
+                                                   operation="root-config --cflags --libs",
+                                                   capture=true, timeout=limit)))
+        metadata = (; root_config=real, version=String(version), flags=Vector{String}(flags))
+        ROOT_METADATA[id] = metadata
+        return metadata
+    end
+end
+
+"""Forget cached `root-config` and compiler metadata (internal; `build_root(force=true)` refreshes one installation)."""
+function clear_backend_cache!()
+    lock(ROOT_METADATA_LOCK) do
+        empty!(ROOT_METADATA)
+        empty!(COMPILER_VERSIONS)
+    end
+    return nothing
+end
+
+"""The C++ compiler selected by `CXX` (default `c++`), resolved on every call."""
+function resolve_compiler()
+    compiler = Sys.which(get(ENV, "CXX", "c++"))
+    compiler === nothing && throw(ArgumentError("C++ compiler not found; set CXX to a compiler executable path (without flags)"))
+    return String(compiler)
+end
+
+"""First line of `compiler --version`, cached per compiler file identity (provenance only)."""
+function compiler_version(compiler::AbstractString)
+    id = executable_identity(compiler)
+    lock(ROOT_METADATA_LOCK) do
+        get!(COMPILER_VERSIONS, id) do
+            text = run_backend(Cmd([String(compiler), "--version"]); operation="compiler --version",
+                               capture=true, timeout=root_config_timeout())
+            String(strip(first(split(text, '\n'; limit=2))))
+        end
+    end
+end
+
+"""
+Content/configuration key of one backend build (internal): ROOT version and
+flags (cached metadata), compiler path and real path, language standard, and the
+SHA-256 of the source and every listed header, hashed again on every call.
+"""
+function backend_identity(config::AbstractString, source::AbstractString, standard::AbstractString;
+                          dependencies=String[])
+    metadata = root_config_metadata(config)
+    compiler = resolve_compiler()
+    source_files = [String(source); String.(dependencies)]
+    source_keys = [(realpath(path), bytes2hex(sha256(read(path)))) for path in source_files]
+    identity = (metadata.root_config, metadata.version, compiler, realpath(compiler), standard,
+                metadata.flags, source_keys)
+    return (; key=bytes2hex(sha256(repr(identity))), compiler, metadata)
+end
+
 """Compile privately and atomically publish a content/configuration-keyed backend.
 
-The Julia lock prevents duplicate builds in this process. Independent Julia
-processes may compile the same key redundantly, but never share a staging file
-or publish a partial binary. No mutable version stamp is used.
+The Julia lock prevents duplicate builds in this process; cache hits do not take
+it. Independent Julia processes may compile the same key redundantly, but never
+share a staging file or publish a partial binary. No mutable version stamp is
+used. The compiler runs under `ROOTPLOTS_COMPILE_TIMEOUT` (default 600 s); a
+failure is a [`RootBackendError`](@ref) with the compiler's messages.
 """
 function compile_root_backend(config::AbstractString, source::AbstractString,
                               name::AbstractString, standard::AbstractString;
                               force::Bool=false,
                               dependencies=String[],
                               build_dir=root_cache_dir())
+    force && root_config_metadata(config; force=true)   # explicit metadata refresh
+    id = backend_identity(config, source, standard; dependencies)
+    destination = joinpath(build_dir, name, id.key)
+    executable = joinpath(destination, name)
+    !force && isfile(executable) && return executable
     lock(ROOT_BUILD_LOCK) do
-        config = realpath(config)
-        compiler = Sys.which(get(ENV, "CXX", "c++"))
-        compiler === nothing && throw(ArgumentError("C++ compiler not found; set CXX to a compiler executable path (without flags)"))
-        version = strip(read(Cmd([config, "--version"]), String))
-        flags = Base.shell_split(strip(read(Cmd([config, "--cflags", "--libs"]), String)))
-        source_files = [String(source); String.(dependencies)]
-        source_keys = [(realpath(path), bytes2hex(sha256(read(path)))) for path in source_files]
-        identity = (config, version, compiler, realpath(compiler), standard, flags, source_keys)
-        key = bytes2hex(sha256(repr(identity)))
-        destination = joinpath(build_dir, name, key)
-        executable = joinpath(destination, name)
         if force || !isfile(executable)
+            limit = compile_timeout()
             mkpath(destination)
             mktempdir(destination; prefix="compile-") do staging
                 temporary = joinpath(staging, name)
-                run(Cmd(vcat([compiler, standard, "-O2", String(source), "-o", temporary], flags)))
+                run_backend(Cmd(vcat([id.compiler, standard, "-O2", String(source), "-o", temporary], id.metadata.flags));
+                            operation="C++ compilation of $name", timeout=limit)
                 # Unlike mv(...; force=true), rename replaces without unlinking
                 # the live destination first. Existing processes retain their inode.
                 Base.Filesystem.rename(temporary, executable)
             end
         end
-        return executable
     end
+    return executable
 end
 
 """Compile the local control renderer, reusing a content/configuration-keyed artifact."""
 function build_root_backend(config::AbstractString; force::Bool=false)
     source = normpath(joinpath(@__DIR__, "..", "backend", "root", "render.cpp"))
     return compile_root_backend(config, source, "rootplots-render", "-std=c++17"; force,
-                                dependencies=[joinpath(dirname(source), header) for header in ("axisstyle.hpp", "experiment.hpp")])
+                                dependencies=[joinpath(dirname(source), header) for header in ("axisstyle.hpp", "experiment.hpp", "outputs.hpp")])
 end
 
 """
@@ -204,27 +285,47 @@ Compile both native backends against a locally installed C++ ROOT using its
 `root-config --cflags --libs`. ROOT itself is not built or downloaded.
 Resolve ROOT as for `render_root`: explicit `root_config`, `ROOT_CONFIG`,
 `ROOTSYS`, then PATH. Return a named tuple containing `root_config`, `version`,
-`renderer`, and `graphfit` paths. Compilation/linking failures propagate.
+`renderer`, and `graphfit` paths. Compilation/linking failures throw a
+[`RootBackendError`](@ref) carrying the compiler's messages.
 
-Unchanged builds are reused; `force=true` recompiles both backends. Rendering
-and fitting also build their backend automatically on first use. Build success
-does not by itself verify graphics output or scientific equivalence to a
-reference plot. Concurrent calls use a locked cache and atomic binary publication;
-rendering/fitting processes keep independent ROOT objects and temporary files.
+Unchanged builds are reused; `force=true` queries `root-config` again and recompiles
+both backends. Rendering and fitting also build their backend automatically on
+first use. The `root-config` output (version and flags) is cached per
+`root-config` file (path, real path, inode, size, modification time) for the
+session; backend sources and headers are hashed and `CXX` is resolved on every
+lookup, so a source edit or another compiler selects another build. Updating
+the ROOT libraries behind an unchanged `root-config` is not detected: use
+`force=true`. `root-config` runs under `ROOTPLOTS_ROOT_CONFIG_TIMEOUT` (default
+60 s), the compiler under `ROOTPLOTS_COMPILE_TIMEOUT` (default 600 s).
+
+Build success does not by itself verify graphics output or scientific
+equivalence to a reference plot. Concurrent calls use a locked cache and atomic
+binary publication; rendering/fitting processes keep independent ROOT objects
+and temporary files.
 """
 function build_root(; root_config=nothing, force::Bool=false)
     config = find_root_config(root_config)
     config === nothing && throw(ArgumentError("local native ROOT not found; install ROOT or pass root_config to build_root"))
-    version = strip(read(Cmd([config, "--version"]), String))
+    version = root_config_metadata(config; force).version
     renderer = build_root_backend(config; force)
     graphfit = graphfit_executable(config; force)
     return (; root_config=config, version, renderer, graphfit)
 end
 
-"""Render selected PNG/PDF output with installed native ROOT through a compiled, batch-mode process. Julia owns all numeric inputs and no ROOT object enters the Julia process."""
+"""
+    render_root(cmps::AbstractVector{Comparison}, specs::AbstractVector{PanelSpec}, outstem;
+                ratio_limits=(0.5, 1.5), style=PlotStyle(), format=:png, provenance=false,
+                root_config=nothing)
+
+Render data/model comparisons with ratio panels by the native control renderer
+(`rootplots-render`). Julia owns all numeric inputs and no ROOT object enters
+the Julia process. `format` (`:png`, `:pdf`, `:both`) selects the files ROOT
+writes; `provenance=true` also writes a reproducibility record and returns
+`(; png, pdf, request, provenance)` (see the graph method of `render_root`).
+"""
 function render_root(cmps::AbstractVector{Comparison}, specs::AbstractVector{PanelSpec},
                      outstem::AbstractString; ratio_limits=(0.5, 1.5),
-                     style=PlotStyle(), format=:png, root_config=nothing)
+                     style=PlotStyle(), format=:png, provenance::Bool=false, root_config=nothing)
     paths = plot_output_paths(outstem, format)
     length(cmps) == length(specs) && !isempty(cmps) ||
         throw(ArgumentError("one PanelSpec is needed per nonempty comparison"))
@@ -238,12 +339,8 @@ function render_root(cmps::AbstractVector{Comparison}, specs::AbstractVector{Pan
     config = find_root_config(root_config)
     config === nothing && throw(ArgumentError("local native ROOT not found; install ROOT or pass root_config to render_root"))
     exe = build_root_backend(config)
-    mkpath(dirname(outstem))
-    mktempdir() do dir
-        specfile = write_root_spec(joinpath(dir, "figure.tsv"), cmps, specs, ratio_limits, style)
-        temporary_stem = joinpath(dir, "rendered")
-        run(Cmd([exe, specfile, temporary_stem]))
-        move_plot_outputs(temporary_stem, paths)
+    return render_request(paths, outstem, (config, exe); operation="comparison rendering",
+                          provenance, name="figure.tsv") do input
+        write_root_spec(input, cmps, specs, ratio_limits, style)
     end
-    return paths
 end

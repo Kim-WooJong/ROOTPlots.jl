@@ -1,4 +1,27 @@
-# Migrating JuliaROOT to ROOTPlots (0.2)
+# Migration
+
+## From 0.2 to 0.3
+
+- Catch `RootBackendError` instead of `ProcessFailedException` for native ROOT,
+  compiler and `root-config` failures; the error includes captured diagnostics.
+- Native backends now default to a 600 s limit, `root-config` to 60 s, and
+  compilation to 600 s. Set `ROOTPLOTS_BACKEND_TIMEOUT`,
+  `ROOTPLOTS_ROOT_CONFIG_TIMEOUT` or `ROOTPLOTS_COMPILE_TIMEOUT` to `0` or `none`
+  to opt out.
+- CMS defaults now follow cms-cat/cmsstyle pinned at
+  `ecfed5a18a7a8da5e49bfce903e40e0f5769c4f1`; margins, canvas geometry and labels
+  can differ from 0.2. See [experiment styles](api.md#experiment-styles).
+- PNG-only rendering no longer creates a PDF as a side effect. Request
+  `format=:both` when both files are needed.
+- Choose projection flow policy explicitly: `flow=false` (the unchanged default)
+  excludes integrated-axis flow bins; `flow=true` includes them, retaining exact
+  stored statistics only when possible. Missing multidimensional flow arrays
+  are treated as empty.
+- Supported Unicode labels are translated for ROOT. Unsupported characters fail
+  only when drawn: a `GraphSeries` label can still be stored and fitted without
+  drawing it.
+
+## Migrating JuliaROOT to ROOTPlots (0.2)
 
 This is a deliberate package rename and dependency reduction, made before the
 first public release, not a compatibility alias. The package UUID is unchanged.

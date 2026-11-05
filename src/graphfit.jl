@@ -52,6 +52,11 @@ Connected lines retain input order. `draw` presets are `:points`, `:line`,
 interpolation, not a numerical fit or additional uncertainty calculation.
 A raw ROOT `draw` string overrides `errors`; the owned frame rejects A/SAME
 and adds SAME itself, unlike histogram raw-option forwarding.
+
+`label` is presentation text: it may contain any characters except tabs,
+newlines and NUL. It is translated to ROOT TLatex when the series is drawn,
+which rejects characters TLatex cannot draw (see `ROOTPlots.root_latex`);
+[`fit_root`](@ref) ignores it.
 """
 struct GraphSeries
     x::Vector{Float64}
@@ -96,11 +101,20 @@ function GraphSeries(x::AbstractVector{<:Real}, y::AbstractVector{<:Real};
            :symmetric in (xkind, ykind) ? :symmetric : :plain
     s = GraphSeries(xx, yy, exl, exh, eyl, eyh, kind, String(label),
                     draw isa AbstractString ? String(draw) : draw, errors, style)
-    validate_graph(s)
+    # The label is only checked for request-breaking characters here; drawing
+    # translates it (and rejects text TLatex cannot draw), fitting ignores it.
+    validate_graph(s; label=false)
+    clean_field(s.label)
+    occursin('\0', s.label) && throw(ArgumentError("NUL is not permitted in a graph label"))
     return s
 end
 
-function validate_graph(s::GraphSeries)
+"""
+Check a graph's numbers, display options and style; with `label=true` (drawing)
+also translate its label for ROOT, which rejects text TLatex cannot draw. Numerical
+fits pass `label=false`: the label is not used there.
+"""
+function validate_graph(s::GraphSeries; label::Bool=true)
     n = length(s.x)
     n > 0 && all(length(v) == n for v in (s.y,s.exlow,s.exhigh,s.eylow,s.eyhigh)) ||
         throw(ArgumentError("graph arrays changed length"))
@@ -121,8 +135,7 @@ function validate_graph(s::GraphSeries)
     s.errors in GRAPH_ERROR_MODES || throw(ArgumentError("invalid graph error mode"))
     s.errors in (:band,:smoothband,:boxes,:caps,:nocaps,:arrows,:filledarrows) && s.kind == :plain &&
         throw(ArgumentError("the requested error display requires stored graph errors"))
-    clean_field(s.label)
-    occursin('\0', s.label) && throw(ArgumentError("NUL is not permitted in a graph label"))
+    label && root_text(s.label)     # also rejects NUL, tabs and newlines
     check_graph_style(s.style)
     return s
 end
@@ -152,7 +165,10 @@ and special graphs.
   `nothing` keeps ROOT's default style. Explicit axis/canvas options still win.
 - `cms_label`, `atlas_label`: experiment label drawn with ROOT TLatex
   (see "Experiment styles" in the API documentation). `style=:CMS` draws the CMS
-  label by default; `cms_label=false` switches it off.
+  label by default; `cms_label=false` switches it off. CMS follows cmsstyle
+  (`setCMSStyle`, `cmsCanvas` geometry on single-pad canvases, `CMS_lumi` label);
+  keys `extra`, `lumi`, `energy`, `right`, `position` (incl. iPos 0/11/22/33),
+  `additional_info`, `cms_text`, `scale_lumi`, `extra_space`, `y_title_offset`.
 """
 Base.@kwdef struct GraphSpec
     xlabel::String = "x"
@@ -181,24 +197,27 @@ with_graph_spec(spec::GraphSpec; kwargs...) = GraphSpec(;
     merge(NamedTuple{fieldnames(GraphSpec)}(Tuple(getfield(spec,f) for f in fieldnames(GraphSpec))),
           (;kwargs...))...)
 
-function graph_limits(series::AbstractVector{GraphSeries}, spec::GraphSpec)
+function graph_limits(series::AbstractVector{GraphSeries}, spec::GraphSpec; strict_log_errors::Bool=false)
     validate_scene(spec; nseries=length(series))
     isempty(series) && throw(ArgumentError("at least one graph series is needed"))
     spec.legend in (:topright,:topleft,:bottomright,:bottomleft,:none) ||
         throw(ArgumentError("invalid legend position"))
     all(x -> 1 <= x <= 10000, spec.size) || throw(ArgumentError("graph size must be in 1:10000"))
     for label in (spec.xlabel,spec.ylabel,spec.title)
-        clean_field(label)
+        root_text(label)
         occursin('\0', label) && throw(ArgumentError("NUL is not permitted in labels"))
     end
     foreach(validate_graph, series)
     function axis(which, explicit, logarithmic)
+        # On a log axis the points must be positive; error bars reaching zero or
+        # below are allowed and clipped by ROOT at the frame edge. Bent and
+        # multi-error graphs (strict_log_errors) still need positive end points.
         if logarithmic
             for s in series
                 center = which == :x ? s.x : s.y
                 elo = which == :x ? s.exlow : s.eylow
                 minimum(center) > 0 || throw(ArgumentError("log $which requires positive graph centers"))
-                !graph_visible_errors(s) || minimum(center .- elo) > 0 ||
+                !strict_log_errors || !graph_visible_errors(s) || minimum(center .- elo) > 0 ||
                     throw(ArgumentError("log $which requires positive visible error endpoints"))
             end
         end
@@ -215,13 +234,16 @@ function graph_limits(series::AbstractVector{GraphSeries}, spec::GraphSpec)
             elo = which == :x ? s.exlow : s.eylow
             ehi = which == :x ? s.exhigh : s.eyhigh
             use_errors = graph_visible_errors(s)
-            append!(lows, use_errors ? center .- elo : center)
+            low = use_errors ? center .- elo : center
+            # A log range follows the positive part of a clipped error bar (its centre).
+            logarithmic && (low = [l > 0 ? l : c for (l, c) in zip(low, center)])
+            append!(lows, low)
             append!(highs, use_errors ? center .+ ehi : center)
             which == :y && !logarithmic && s.draw in (:bar,:bar_offset) && push!(lows,0.)
         end
         lo, hi = minimum(lows), maximum(highs)
         if logarithmic
-            lo > 0 || throw(ArgumentError("log $which requires positive centers and visible error endpoints"))
+            lo > 0 || throw(ArgumentError("log $which requires positive graph centers"))
             lo == hi && return (lo/sqrt(10), hi*sqrt(10))
             pad = (log(hi)-log(lo))*0.05
             return (exp(log(lo)-pad), exp(log(hi)+pad))
@@ -304,13 +326,20 @@ function graphfit_executable(config::AbstractString; force::Bool=false)
     return compile_root_backend(config, source, "rootplots-graphfit", "-std=c++20";
                                 force, dependencies=[joinpath(dirname(source), header) for header in
                                     ("advanced_histograms.hpp", "analytic.hpp", "axisstyle.hpp", "errorgraphs.hpp", "experiment.hpp", "layouts.hpp",
-                                     "polygons.hpp", "primitives.hpp", "specialgraphs.hpp", "statsbox.hpp")])
+                                     "outputs.hpp", "polygons.hpp", "primitives.hpp", "specialgraphs.hpp", "statsbox.hpp")])
+end
+
+"""Locate ROOT and build (or reuse) `rootplots-graphfit`: `(config, exe)` for `render_request`."""
+function graphfit_backend(root_config)
+    config = find_root_config(root_config)
+    config === nothing && throw(ArgumentError("local native ROOT not found"))
+    return (config, graphfit_executable(config))
 end
 
 function write_graph_series(io, series)
     for (id,s) in enumerate(series)
         row = ("SERIES",id,length(s.x),s.kind,graph_series_draw(s),s.errors,
-                          clean_field(root_latex(s.label)),s.style.color,
+                          root_text(s.label),s.style.color,
                           s.style.marker_style,s.style.marker_size,
                           s.style.line_width,s.style.line_style)
         if s.style.fill_color !== nothing || s.style.fill_style != 1001 || s.style.fill_alpha != 0.35
@@ -333,25 +362,33 @@ function write_graph_spec(path, series, spec, limits; request=nothing, attached_
                           limits[1]...,limits[2]...,String(spec.legend)), '\t'))
         request === nothing || write_stats_row(io, request)
         if attached_fit !== nothing
-            println(io, join(("FITTARGET", attached_to, clean_field(root_latex(String(fit_label)))), '\t'))
+            println(io, join(("FITTARGET", attached_to, root_text(String(fit_label))), '\t'))
             write_attached_fit(io, attached_fit)
         end
-        println(io, join(("LABELS",clean_field(root_latex(spec.title)),
-                          clean_field(root_latex(spec.xlabel)),clean_field(root_latex(spec.ylabel))), '\t'))
+        println(io, join(("LABELS",root_text(spec.title),
+                          root_text(spec.xlabel),root_text(spec.ylabel)), '\t'))
         write_scene(io,spec)
         write_graph_series(io,series)
     end
 end
 
-"""Write one native two-pad χ² histogram-fit diagnostic request."""
-function write_fit_plot_spec(path, series, spec, limits, pull_limits)
+"""Write one native two-pad χ² histogram-fit diagnostic request.
+
+`series` are the fit curve, the data points (style and legend label of the
+data) and the pulls; `hist` is drawn in the upper pad as a native TH1D.
+"""
+function write_fit_plot_spec(path, series, spec, limits, pull_limits, hist::Hist1D)
     open(path, "w") do io
         println(io, "ROOTPlotsGraph\t1")
         println(io, join(("DRAWFIT",spec.size[1],spec.size[2],Int(spec.logx),Int(spec.logy),
                           limits[1]...,limits[2]...,pull_limits...,String(spec.legend)), '\t'))
-        println(io, join(("LABELS",clean_field(root_latex(spec.title)),
-                          clean_field(root_latex(spec.xlabel)),clean_field(root_latex(spec.ylabel))), '\t'))
+        println(io, join(("LABELS",root_text(spec.title),
+                          root_text(spec.xlabel),root_text(spec.ylabel)), '\t'))
         write_scene(io,spec)
+        println(io, "FITHIST\t", length(hist.sumw))
+        for i in eachindex(hist.sumw)
+            println(io, join(("BIN", i, hist.edges[i], hist.edges[i+1], hist.sumw[i], hist.sumw2[i]), '\t'))
+        end
         write_graph_series(io,series)
     end
 end
@@ -359,7 +396,7 @@ end
 """
     render_root(series::AbstractVector{GraphSeries}, spec, outstem; format=:png,
                 attached_fit=nothing, attached_to=1, fitstats=false,
-                stats_position=:auto, fit_label="", stats_headroom=false)
+                stats_position=:auto, fit_label="", stats_headroom=false, provenance=false)
 
 Render one-pad ROOT TGraph/TGraphErrors/TGraphAsymmErrors series in the selected format.
 
@@ -370,11 +407,22 @@ statistics, as in ROOT): `true` = χ²/ndf, Prob, and parameters ± errors; see
 [`fit_option`](@ref). `stats_position` places it as for histograms, and
 `fit_label` adds the TF1 to the legend (after all series). `stats_headroom=true`
 raises the automatic y maximum so the points stay below the fit box.
+
+Output and records (all `render_root` methods): `format` is `:png`, `:pdf`, or
+`:both`; ROOT writes only the requested files and the result is `(; png, pdf)`
+with `nothing` for an unrequested format. `provenance=true` (default `false`) also
+writes, after a successful rendering, `<stem>.request.tsv` (the exact native
+request, data and labels inline and verbatim, so it may be as sensitive as the
+input) and `<stem>.provenance.toml` (package, Julia, ROOT and compiler versions,
+OS kernel/architecture, backend key, style, formats, SHA-256 of the request and
+outputs; file names only, no paths, flags, host or user names), and returns
+`(; png, pdf, request, provenance)`. The native process runs under
+`ROOTPLOTS_BACKEND_TIMEOUT` (default 600 s) or the enclosing `rootmap` limit.
 """
 function render_root(series::AbstractVector{GraphSeries}, spec::GraphSpec,
                      outstem::AbstractString; format=:png, attached_fit=nothing,
                      attached_to::Integer=1, fitstats=false, stats_position=:auto,
-                     fit_label="", stats_headroom=false, root_config=nothing)
+                     fit_label="", stats_headroom=false, provenance::Bool=false, root_config=nothing)
     paths = plot_output_paths(outstem, format)
     limits = graph_limits(series, spec) # validation before build or output creation
     check_spec_bins(spec, "a graph")
@@ -382,19 +430,11 @@ function render_root(series::AbstractVector{GraphSeries}, spec::GraphSpec,
     1 <= attached_to <= length(series) || throw(ArgumentError("attached_to must index a graph series"))
     request = stats_request(; fitstats, stats_position, fit=attached_fit, name="Graph",
                             allow_stats=false, what="graphs", stats_headroom, ylimits=spec.ylimits)
-    clean_field(String(fit_label))
-    config = find_root_config(root_config)
-    config === nothing && throw(ArgumentError("local native ROOT not found"))
-    exe = graphfit_executable(config)
-    mkpath(dirname(outstem))
-    mktempdir() do dir
-        input = joinpath(dir,"graph.tsv")
+    root_text(String(fit_label))
+    return render_request(paths, outstem, graphfit_backend(root_config);
+                          operation="graph rendering", provenance, name="graph.tsv") do input
         write_graph_spec(input,series,spec,limits; request,attached_fit,attached_to,fit_label)
-        stem = joinpath(dir,"rendered")
-        run(Cmd([exe,input,stem]))
-        move_plot_outputs(stem, paths)
     end
-    return paths
 end
 
 function fit_root(data::Union{GraphSeries,Hist1D}, model::Symbol;
@@ -426,7 +466,10 @@ function fit_root(data::Union{GraphSeries,Hist1D}, model::Symbol;
     objective in (:chi2,:poisson,:weighted_poisson) || throw(ArgumentError("invalid objective"))
     xerrors in (:effective,:ignore) || throw(ArgumentError("xerrors must be :effective or :ignore"))
     if data isa GraphSeries
-        validate_graph(data)
+        validate_graph(data; label=false)   # the label is presentation only, not sent
+        # The native fit reads at most 1,000,000 points or bins (graphfit.cpp).
+        length(data.x) <= 1_000_000 ||
+            throw(ArgumentError("ROOT fits accept at most 1,000,000 graph points (got $(length(data.x)))"))
         objective == :chi2 || throw(ArgumentError("graph fits support :chi2 only"))
         data.kind == :plain || all(>(0),data.eylow) && all(>(0),data.eyhigh) ||
             throw(ArgumentError("graph fit requires strictly positive y errors"))
@@ -437,6 +480,8 @@ function fit_root(data::Union{GraphSeries,Hist1D}, model::Symbol;
         length(data.edges) == length(data.sumw)+1 == length(data.sumw2)+1 &&
             all(diff(data.edges) .> 0) && all(>=(0),data.sumw2) ||
             throw(ArgumentError("histogram data changed invalidly"))
+        1 <= length(data.sumw) <= 1_000_000 ||
+            throw(ArgumentError("ROOT fits accept 1 to 1,000,000 histogram bins (got $(length(data.sumw)))"))
         if objective != :chi2
             all(>=(0),data.sumw) || throw(ArgumentError("likelihood fit forbids negative bins"))
             if objective == :poisson
@@ -467,8 +512,9 @@ function fit_root(data::Union{GraphSeries,Hist1D}, model::Symbol;
             end
             if data isa GraphSeries
                 s=data
+                # The fit draws nothing: an empty label replaces the series label.
                 println(io,join(("SERIES",1,length(s.x),s.kind,graph_series_draw(s),s.errors,
-                                  clean_field(s.label),s.style.color,s.style.marker_style,
+                                  "",s.style.color,s.style.marker_style,
                                   s.style.marker_size,s.style.line_width,s.style.line_style), '\t'))
                 for i in eachindex(s.x)
                     println(io,join(("POINT",1,i,s.x[i],s.y[i],s.exlow[i],s.exhigh[i],
@@ -483,7 +529,7 @@ function fit_root(data::Union{GraphSeries,Hist1D}, model::Symbol;
             end
             println(io,"END\t1")
         end
-        run(Cmd([exe,input,output]))
+        run_backend(Cmd([exe,input,output]); operation="ROOT fit ($(model))", request=input)
         return read_fit_result(output,model,r,objective)
     end
 end

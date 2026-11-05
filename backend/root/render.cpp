@@ -14,6 +14,7 @@
 #include <TH2D.h>
 #include <THStack.h>
 #include <TLegend.h>
+#include <TLegendEntry.h>
 #include <TLine.h>
 #include <TLatex.h>
 #include <TPad.h>
@@ -81,6 +82,7 @@ bool bit(const std::string &text) { return boolean(text); }
 void color(const std::string &text) { check(hexcolor(text), "invalid color: " + text); }
 #include "axisstyle.hpp"
 #include "experiment.hpp"
+#include "outputs.hpp"
 struct Bin {
   int index;
   double left, right, data, data_lo, data_hi, pred, pred_lo, pred_hi;
@@ -96,7 +98,8 @@ struct Panel {
   std::string xlabel, ylabel, annotation, lumi, uncertainty_label;
   std::vector<Bin> bins;
   std::vector<Component> components;
-  bool logx = false, logy = false, ratio_logy = false, axis_seen = false;
+  bool logx = false, logy = false, ratio_logy = false, axis_seen = false, canvas_seen = false;
+  std::vector<std::string> axes_seen; // PAXIS names, each at most once
   double ymin = 0, ymax = 0, ratio_min = 0.5, ratio_max = 1.5;
   // Optional PanelSpec axis styles (PCANVAS/PAXIS rows): shared x, upper y, ratio y.
   std::vector<std::string> canvas = std::vector<std::string>(CV_FIELDS, "-");
@@ -196,7 +199,8 @@ Figure parse(const std::string &path) {
     } else if (f[0] == "PCANVAS") {
       check(f.size() == 2 + CV_FIELDS && !figure.panels.empty(), "malformed PCANVAS row");
       auto &p = figure.panels.back();
-      check(integer(f[1]) == p.id && p.bins.empty(), "invalid PCANVAS row");
+      check(integer(f[1]) == p.id && p.bins.empty() && !p.canvas_seen, "invalid or duplicate PCANVAS row");
+      p.canvas_seen = true;
       p.canvas.assign(f.begin() + 2, f.end());
       canvas_title_fields(p.canvas);
       for (int i = 0; i < CV_FIELDS; ++i)
@@ -209,6 +213,9 @@ Figure parse(const std::string &path) {
       check(integer(f[1]) == p.id && p.bins.empty(), "invalid PAXIS row");
       p.current_axis = f[2] == "x" ? &p.xaxis : f[2] == "y" ? &p.yaxis : f[2] == "ratio" ? &p.ratio_axis : nullptr;
       check(p.current_axis != nullptr, "invalid PAXIS axis");
+      check(std::find(p.axes_seen.begin(), p.axes_seen.end(), f[2]) == p.axes_seen.end(),
+            "duplicate PAXIS row");
+      p.axes_seen.push_back(f[2]);
       p.current_axis_name = f[2];
       axis_scalars(*p.current_axis, f, 3);
     } else if (f[0] == "AXTIME" || f[0] == "AXBIN" || f[0] == "AXCHANGE") {
@@ -219,12 +226,18 @@ Figure parse(const std::string &path) {
       check(f.size() == 17 && !figure.panels.empty(), "malformed BIN row");
       auto &p = figure.panels.back();
       check(integer(f[1]) == p.id, "BIN panel id disagrees");
+      check(p.components.empty(), "BIN row after COMP rows");
+      check(f[16] == "0" || f[16] == "1", "invalid BIN validity flag");
       Bin b{integer(f[2]), number(f[3]), number(f[4]), number(f[5]),
             number(f[6]), number(f[7]), number(f[8]), number(f[9]),
             number(f[10]), number(f[11]), number(f[12]), number(f[13]),
             number(f[14]), number(f[15]), integer(f[16]) != 0};
-      check(b.index == int(p.bins.size()) + 1 && b.left < b.right,
+      check(b.index == int(p.bins.size()) + 1 && b.index <= p.nbins && b.left < b.right,
             "invalid bin index or edges");
+      // Errors are magnitudes; the prediction is a sum of nonnegative components.
+      check(b.data_lo >= 0 && b.data_hi >= 0 && b.pred >= 0 && b.pred_lo >= 0 && b.pred_hi >= 0 &&
+            b.ratio_lo >= 0 && b.ratio_hi >= 0 && b.band_lo >= 0 && b.band_hi >= 0,
+            "negative bin error or prediction");
       if (!p.bins.empty()) check(p.bins.back().right == b.left, "noncontiguous bins");
       p.bins.push_back(b);
     } else if (f[0] == "COMP") {
@@ -233,6 +246,8 @@ Figure parse(const std::string &path) {
       check(f.size() == size_t(5 + p.nbins), "malformed COMP row");
       check(integer(f[1]) == p.id && integer(f[2]) == int(p.components.size()) + 1,
             "invalid component ordering");
+      check(int(p.bins.size()) == p.nbins, "COMP row before all BIN rows");
+      check(!f[3].empty() && hexcolor(f[4]), "invalid component label or color");
       Component c{f[3], f[4], {}};
       for (int i = 0; i < p.nbins; ++i) {
         double value = number(f[5 + i]);
@@ -501,7 +516,8 @@ void quiet_root() {
 
 int main(int argc, char **argv) {
   try {
-    check(argc == 3, "usage: rootplots-render spec.tsv output-stem");
+    check(argc == 3 || argc == 4, "usage: rootplots-render spec.tsv output-stem [--formats=png|pdf|png,pdf]");
+    if (argc == 4) set_output_formats(argv[3]);
     gROOT->SetBatch(kTRUE);
     quiet_root();
     gStyle->SetOptStat(0); gStyle->SetOptTitle(0);
@@ -520,11 +536,12 @@ int main(int argc, char **argv) {
     }
     canvas.cd(); canvas.Modified(); canvas.Update();
     finish_canvas(canvas);
-    canvas.SaveAs((std::string(argv[2]) + ".png").c_str());
-    canvas.SaveAs((std::string(argv[2]) + ".pdf").c_str());
+    save_outputs(canvas, argv[2]);
     return 0;
   } catch (const std::exception &e) {
+    // Exit code 2: a controlled error (malformed request or ROOT failure), as in
+    // rootplots-graphfit. No image is written: SaveAs runs only after validation.
     std::cerr << "ROOTPlots ROOT backend: " << e.what() << '\n';
-    return 1;
+    return 2;
   }
 }

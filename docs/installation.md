@@ -77,10 +77,30 @@ staging files, followed by atomic publication. Independent Julia processes may
 compile redundantly but do not expose partially written executables. Failed
 forced builds leave the previous executable intact.
 
+The output of `root-config --version` and `--cflags --libs` is cached for the Julia
+session per `root-config` file (path, real path, inode, size, modification time);
+source/header hashes and the `CXX` compiler are checked on every lookup.
+
 Use `force=true` after replacing an SDK/compiler or ROOT in place without
-changing its path/version. Individual old build keys are not automatically
+changing its path/version (it also queries `root-config` again). Individual old build keys are not automatically
 evicted by ROOTPlots. Scratch/Pkg manage the cache lifecycle; do not delete
 artifacts while jobs are running. No source cleanup is needed after building.
+
+## Time limits
+
+| variable | applies to | default |
+| --- | --- | --- |
+| `ROOTPLOTS_BACKEND_TIMEOUT` | each ROOT backend process (render, fit, helpers) | 600 s |
+| `ROOTPLOTS_ROOT_CONFIG_TIMEOUT` | each `root-config` (and `CXX --version`) query | 60 s |
+| `ROOTPLOTS_COMPILE_TIMEOUT` | each backend compilation | 600 s |
+
+Values are positive seconds; `0` or `none` disables the limit, unset/empty keeps the
+default, anything else is an `ArgumentError` before a process starts. Slow
+servers or network file systems may need a longer compile limit for the first
+build. On macOS/Linux a process over its limit is stopped with its process group
+(SIGTERM, 2 s grace, SIGKILL) and reaped; on Windows only the direct child is
+terminated. `rootmap(...; timeout=t)` overrides the backend limit for one batch.
+See [API: native processes](api.md#native-processes-time-limits-cancellation-formats-records).
 
 ## ROOT messages
 

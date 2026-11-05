@@ -1,5 +1,164 @@
 # Changelog
 
+## 0.3.0 (2026-11-05)
+
+- Native process limits: every native process (ROOT backends, `root-config`, the
+  compiler) runs under a time limit (`ROOTPLOTS_BACKEND_TIMEOUT` 600 s,
+  `ROOTPLOTS_ROOT_CONFIG_TIMEOUT` 60 s, `ROOTPLOTS_COMPILE_TIMEOUT` 600 s; `0`/`none`
+  disables; invalid values fail before a process starts). On macOS/Linux the
+  process leads its own process group; on a timeout or an interrupt of the waiting
+  task the group gets SIGTERM, then SIGKILL after 2 s, and the child is reaped
+  (Windows: direct child only). `RootBackendError` gained `timedout` and `timeout`
+  fields (the six-field constructor still works). `rootmap(...; timeout=t)` sets a
+  per-batch backend limit through a scoped value; an interrupt cancels only that
+  invocation's processes (nested batches included), stops scheduling, joins the
+  workers and rethrows the `InterruptException`. Julia callbacks are not timed out.
+  An interrupt or error at any point of a native run, including the wait for
+  output streams still held by descendants after the child exited, stops the
+  owned process group and waits for it before the exception is rethrown.
+- Compatibility: compiler and `root-config` failures are now `RootBackendError`
+  (was `ProcessFailedException`); native processes get `devnull` as standard input
+  and run in their own session (a terminal Ctrl-C reaches Julia, which stops them).
+- Output formats: `format=:png` / `:pdf` make ROOT write only that file (the native
+  renderers take `--formats=png|pdf|png,pdf`; without it both files are written as
+  before). Images are unchanged: the PNG is byte-identical to the PNG of a `:both`
+  run; visual references unchanged. The renderer now runs in its private temporary
+  directory with a relative output stem, so a PDF's `/Title` is `rendered.pdf`
+  instead of an absolute temporary path (pixels unchanged). A relative `TMPDIR`
+  works: the private directory, request and working directory are made absolute,
+  and the child alone gets `TMPDIR` as an absolute path (Julia's `ENV` unchanged).
+- Reproducibility records (opt-in): `provenance=true` on every `render_root` method
+  writes `<stem>.request.tsv` (exact request, data verbatim) and
+  `<stem>.provenance.toml` (versions, OS/arch, backend key, style, formats,
+  SHA-256 digests; no paths, flags, host or user names) after a successful
+  rendering and returns `(; png, pdf, request, provenance)`. A failure while
+  writing either record removes its temporary file; the two renames are not
+  atomic as a pair (documented). Default return values
+  and files are unchanged. New standard-library dependency: TOML.
+- `root-config` output (version, flags) is cached per `root-config` file identity (path,
+  real path, inode, size, mtime) for the session; backend sources are still hashed
+  and `CXX` resolved on every lookup; `build_root(force=true)` refreshes. Cache hits no
+  longer take the build lock.
+- New `scripts/benchmark.jl` (warmed medians/IQR; no speed-up is claimed beyond its
+  measurements) and `scripts/runtime_demo.jl`.
+- Histogram operations (new): `c * h`, `h * c`, `h / c` scale a `Hist1D`/`Hist2D`/`Hist3D`
+  like ROOT's `TH1::Scale` (every bin including flows; `Σw²` by c²; moments scaled,
+  entries kept; finite factors only, `h / 0` and Float64 overflow are errors;
+  `0 * h` keeps the fill count as `Scale(0)` does). `merge(a, b, more...)` combines
+  independent samples with identical edges like `TH1::Add(h, 1)` (bins, flows,
+  variances, known entries and moments add; unknown stays unknown; the same
+  histogram twice is rejected with advice to scale instead). `projection(...;
+  flow=false)` gained `flow=true` for 2D/3D → 1D and 3D → 2D: integrated axes
+  include their flow bins, projected axes keep theirs, and the original entries
+  and moments are kept only when exact (conservative rule; differences from
+  ROOT 6.40 `ProjectionX` documented). A `Hist2D`/`Hist3D` without
+  `bins_with_flow` counts as having empty flow bins (documented assumption). The
+  default projection is unchanged. Scaling does not check Float64 underflow (tiny
+  factors can round variances to zero; documented). All results own new arrays. New `docs/recipes.md` and `scripts/histogram_ops_demo.jl`.
+- Native request validation: the comparison renderer (`rootplots-render`) now
+  exits with code 2 for malformed requests, like `rootplots-graphfit` (was 1), and
+  rejects more malformed input: duplicate `PCANVAS`/`PAXIS` rows, `BIN` rows after
+  `COMP` rows or beyond the bin count, `COMP` rows before all bins, invalid
+  component labels/colours, negative errors or predictions, and validity flags
+  other than 0/1. `rootplots-graphfit` rejects a `CMSCANVAS` row that does not
+  directly follow a scene's CMS `ROOTSTYLE` row (it was silently ignored), and
+  checks its field count and ranges in every request. Requests written by the
+  package are unchanged.
+- `AxisStyle(time_offset=t)` requires `abs(t) < 2^31` seconds (Julia and the native
+  bridges): ROOT 6.40's `TAxis::SetTimeOffset` keeps 32-bit seconds, printed a wrong
+  offset beyond 2038 and crashed (SIGSEGV) on huge values. Found by the new optional
+  `scripts/fuzz_native_requests.jl`, which mutates valid requests and requires every
+  run to succeed with an image or fail with exit code 2.
+- Test hook: `ROOTPLOTS_AXIS_DUMP` also writes `LEGEND` (box) and `LEGENTRY`
+  (label, option) records. New tests check the texts of the visual-reference
+  figures without pixels, the native exit-code contract, and fit covariances
+  against closed-form least squares and the analytic Jacobian.
+- The CMS style's upstream reference is pinned to cms-cat/cmsstyle commit
+  `ecfed5a18a7a8da5e49bfce903e40e0f5769c4f1` (style values unchanged).
+- `scripts/correctness_demo.jl`: the CMS example with the long y title
+  "Events / GeV" uses cmsstyle's recipe `cms_label=(extra_space=0.05,
+  y_title_offset=1.1)` (with the default non-square geometry the title reached
+  the canvas edge); the CMS default is unchanged.
+- Log-y histogram fit/pull views no longer fail on ordinary data with empty tail
+  bins or single-entry bins. The upper pad now draws the histogram as a native
+  ROOT `TH1D` (`E1 X0`: markers and capped error bars, no bin-width x bars)
+  instead of a graph, so ROOT's TH1 rules apply: empty bins are not drawn (also on
+  linear axes, where a marker at zero was drawn before), bins below a log frame are
+  skipped, and error bars reaching zero are clipped at the frame. The automatic log
+  range follows the drawn bins; the fit curve is clipped below them. A log axis
+  without any positive bin, or with non-positive `ylimits`, is still an
+  `ArgumentError`. Protocol: `DRAWFIT` requests carry a `FITHIST` block.
+- Graphs on log axes: error bars that reach zero or below are accepted and
+  clipped at the frame edge by ROOT (before, `render_root` rejected them); point
+  centres must still be positive. The automatic range follows the bars' positive
+  part. Applies to `GraphSeries` in graphs, panels and overlays (bent and
+  multi-error graphs keep their stricter checks).
+- Unicode labels: every text sent to ROOT (titles, axis titles, legend entries,
+  statistics-box headers, `PlotText`, line labels, CMS/ATLAS texts, bin labels,
+  `LabelChange` texts, comparison-panel texts, time formats) is translated to ROOT
+  TLatex: all Greek letters, superscript/subscript digits and signs (`GeV/c²` →
+  `GeV/c^{2}`), `± × ÷ · ° − ≤ ≥ ≠ ≈ ∝ ∞ ∂ ∇ √ ∑ ∫ ∈ ⊂ ∩ ∪`, arrows, `ℏ`, `Å`,
+  accented letters (`x̄` → `#bar{x}`, `é` → `#acute{e}`) and typographic
+  punctuation. Before, only `μ` and `ℓ` were translated (`ℓ` to `#ell`, which
+  TLatex does not know; it is now `#font[12]{l}`) and any other Unicode label was
+  drawn as mojibake. ASCII text (including ROOT `#` syntax) is unchanged, also
+  when mixed with translated characters: `"#sigma_{m} [GeV/c²]"` →
+  `"#sigma_{m} [GeV/c^{2}]"`, `"#splitline{α}{β}"` → `"#splitline{#alpha}{#beta}"`
+  (only a translated `#in`/`#subset`/`#supset` followed by a letter gets ROOT's
+  `^{}` separator). `GraphSeries` stores any label without tabs, newlines or NUL
+  (as in 0.2.2); drawing translates it and rejects text TLatex cannot draw, while
+  `fit_root` ignores the label (it draws nothing), so series labelled with e.g.
+  Hangul or emoji can still be fitted.
+  Characters TLatex cannot draw (e.g. Hangul, CJK, emoji) now raise an
+  `ArgumentError` naming the character before ROOT runs, and a request file that
+  still contains non-ASCII text is refused.
+- Native failures: a failed ROOT process now throws the new exported
+  `RootBackendError` (operation, request kind, executable, exit code or signal,
+  and the process's stderr text, bounded to its first and last 32 KiB) instead of
+  `Base.ProcessFailedException` with the message only printed to the terminal.
+  Applies to rendering, fitting, profile statistics, special-graph points,
+  `root_styles` and the image helpers; `rootmap` keeps each job's
+  `RootBackendError` and indents its message under the job index. Standard error
+  is read concurrently (large output cannot block a process) and is written to
+  Julia's `stderr` after a successful run, so ROOT warnings and
+  `ROOTPLOTS_ROOT_VERBOSE=1` output stay visible. Compiler and `root-config` failures also use `RootBackendError`
+  (see the compatibility note above).
+- `fit_root` rejects more than 1,000,000 histogram bins or graph points in Julia,
+  before starting ROOT (the native fit's limit).
+- ROOT Entries of a `Hist1D`/`Hist2D`/`Hist3D` with unbinned `moments` but unknown
+  `entries`: ROOT showed the number of bins the bridge had set (visible plus flow
+  bins). It now shows ROOT's effective entries from `TH1::ResetStats` (as without
+  moments; ROOT 6.40 includes the flow bins), while Mean/Std Dev keep the supplied
+  unbinned moments. Known entries are unchanged.
+- Test hook: `ROOTPLOTS_AXIS_DUMP` also writes `DRAWN` records (class, name, draw
+  option) for every pad primitive. New script `scripts/correctness_demo.jl`.
+
+- CMS style now follows the CMS Collaboration's cmsstyle package
+  (https://github.com/cms-cat/cmsstyle), the reference for CMS-style figures:
+  - `style=:CMS` TStyle values are cmsstyle's `setCMSStyle`: pad margins top 0.05,
+    bottom 0.13, left 0.16, right 0.02 (were 0.08/0.13/0.16/0.04), axis title offsets
+    x 1.1, y 1.35 (were 0.9/1.25), label offset 0.012 (was 0.007), function line
+    width 1 (was 2), marker size 1, legend text size 0.04, hatch width 2 / spacing 1.3.
+  - Single-pad canvases (graphs, 1-D/2-D histograms, functions, special graphs,
+    one-panel figures) take cmsstyle's `cmsCanvas` geometry: top 0.07, bottom
+    0.145, right 0.05 H/W, left from 0.145 H and the y title offset, x title offset
+    1.05, y title offset 0.78 (non-square) or 1.2 (square canvas). Two-pad views,
+    multi-panel figures and 3-D views keep the `setCMSStyle` margins.
+  - The CMS label uses cmsstyle's `CMS_lumi` geometry: inside positions 0.035 of
+    the frame from its edges (was 0.045), additional lines at the extra-text size
+    and cmsstyle's spacing, the outside extra text at cmsstyle's offset after "CMS".
+  - New `cms_label` keys: `right` (free text at the luminosity position),
+    `additional_info` (AppendAdditionalInfo), `cms_text` (SetCmsText), `scale_lumi`,
+    `extra_space` and `y_title_offset` (cmsCanvas extraSpace/yTitOffset; need
+    `style=:CMS`); `position` also accepts `:inside_center` and cmsstyle iPos codes
+    0/11/22/33; `extra` accepts the nicknames "p", "s", "su", "wip", "pw", and an
+    extra text containing "Private" drops the "CMS" text (cmsstyle behaviour).
+  - Protocol: `EXPLABEL` row gained the CMS text and luminosity scale fields; new
+    `CMSCANVAS` scene row.
+  - Visual reference `cms_style.png` regenerated; new reference `cms_outside.png`
+    (ME0-like layout: outside label, right text, extra space, log y). Other references
+    unchanged.
+
 ## 0.2.2 (2026-10-30)
 
 - Two-pad views (comparison ratio panels and fit/pull), with the default style,

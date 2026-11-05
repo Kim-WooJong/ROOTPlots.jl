@@ -3,10 +3,12 @@ module ROOTPlots
 using DataFrames: AbstractDataFrame
 using SpecialFunctions: gamma_inc, erf, erfc
 using SHA: sha256
+import TOML
 using Scratch: @get_scratch!
+using Base.ScopedValues: ScopedValue, with
 
 export Hist1D, Component, BinErrors, PanelSpec, PlotStyle, comparison,
-       histogram, render_root, root_available, build_root, rootmap, RootMapError,
+       histogram, render_root, root_available, build_root, rootmap, RootMapError, RootBackendError,
        GraphSeries, GraphSpec, GraphStyle, FitResult, fit_root, fit_curve,
        AxisStyle, LabelChange, CanvasStyle, PlotLine, PlotText, LegendSpec, LegendEntry,
        Grid2D, Grid3D, Graph3D, Graph2DSpec, Graph3DSpec,
@@ -24,13 +26,17 @@ export Hist1D, Component, BinErrors, PanelSpec, PlotStyle, comparison,
 include("histograms.jl")
 include("histogramnd.jl")
 include("tables.jl")
+include("backend_runner.jl")
+include("rootlatex.jl")
 include("scene.jl")
 include("comparison.jl")
 include("presentation.jl")
 include("root_backend.jl")
+include("native_outputs.jl")
 include("graphfit.jl")
 include("statsbox.jl")
 include("statistics.jl")
+include("histogram_ops.jl")
 include("histdraw.jl")
 include("graphnd.jl")
 include("functionplots.jl")

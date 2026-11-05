@@ -249,7 +249,8 @@ function error_graph_envelope(s::MultiErrorSeries)
                        yerrors=(low=low, high=high), draw=s.draw, style=s.style)
 end
 
-error_graph_limits(s::ErrorGraph, scene) = graph_limits([error_graph_envelope(validate_error_graph(s))], scene)
+error_graph_limits(s::ErrorGraph, scene) =
+    graph_limits([error_graph_envelope(validate_error_graph(s))], scene; strict_log_errors=true)
 
 with_layer_style(s::BentErrorSeries, label, style) =
     validate_error_graph(BentErrorSeries(s.x,s.y,s.exlow,s.exhigh,s.eylow,s.eyhigh,s.xbend_low,s.xbend_high,
@@ -285,11 +286,13 @@ function write_error_graph(io, s::MultiErrorSeries)
     end
 end
 
-render_root(s::ErrorGraph, spec::GraphSpec, outstem::AbstractString; format=:png, root_config=nothing) =
-    render_root([s], spec, outstem; format, root_config)
+render_root(s::ErrorGraph, spec::GraphSpec, outstem::AbstractString; format=:png,
+            provenance::Bool=false, root_config=nothing) =
+    render_root([s], spec, outstem; format, provenance, root_config)
 
 """
-    render_root(layers::AbstractVector, spec::GraphSpec, outstem; format=:png, root_config=nothing, kwargs...)
+    render_root(layers::AbstractVector, spec::GraphSpec, outstem; format=:png, provenance=false,
+                root_config=nothing, kwargs...)
 
 Draw mixed XY layers (`GraphSeries`, `BentErrorSeries`, `MultiErrorSeries`,
 `ModelCurve`, `Hist1D`) on one pad. Equivalent to
@@ -298,7 +301,8 @@ such as `stats`, `fitstats`, and `attached_fit` apply; vectors containing only
 `GraphSeries` or only `Hist1D` keep their dedicated methods.
 """
 function render_root(layers::AbstractVector, spec::GraphSpec, outstem::AbstractString;
-                     format=:png, root_config=nothing, kwargs...)
+                     format=:png, provenance::Bool=false, root_config=nothing, kwargs...)
     panel_layers(layers)  # rejects unsupported layer types before any output
-    return render_root(PlotFigure([PlotPanel(collect(layers), spec; kwargs...)]; size=spec.size), outstem; format, root_config)
+    return render_root(PlotFigure([PlotPanel(collect(layers), spec; kwargs...)]; size=spec.size), outstem;
+                       format, provenance, root_config)
 end

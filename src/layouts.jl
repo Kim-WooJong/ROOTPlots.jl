@@ -257,7 +257,7 @@ function write_basic_panel(path,panel)
                           allow_stats=first_hist !== nothing,what="panels without a histogram layer",
                           name=stats_header(get(opts,:stats_name,nothing),owner === nothing ? "" : String(labels[owner])))
     fit_label=String(get(opts,:fit_label,""))
-    clean_field(fit_label)
+    root_text(fit_label)
     open(path,"w") do io
         println(io,"ROOTPlotsGraph\t1")
         println(io,join(("PLOT",spec.size...,dimensions,Int(scene.logx),Int(scene.logy),Int(logz),
@@ -378,11 +378,15 @@ function write_figure_grid(io,figure::PlotFigure,payloads,decorations,counter)
     end
 end
 
-function render_root(figure::PlotFigure,outstem::AbstractString;format=:png,root_config=nothing)
+function render_root(figure::PlotFigure,outstem::AbstractString;format=:png,provenance::Bool=false,
+                     root_config=nothing)
     paths=plot_output_paths(outstem,format)
     figure=figure_style(styled_figure(figure))
     leaves=figure_leaves(figure)
-    mktempdir() do dir
+    # Every panel payload is written inline into the one figure request.
+    return render_request(paths, outstem, () -> graphfit_backend(root_config);
+                          operation="panel/figure rendering", provenance, name="figure.tsv") do input
+        dir=dirname(input)
         payloads=Vector{String}[]
         decorations=Vector{String}[]
         for (i,panel) in enumerate(leaves)
@@ -420,22 +424,13 @@ function render_root(figure::PlotFigure,outstem::AbstractString;format=:png,root
             values=unique(filter(!isnothing,[c[position] for c in global_controls]))
             length(values)<=1 || throw(ArgumentError("pads have conflicting global ROOT error/PS settings"))
         end
-        input=joinpath(dir,"figure.tsv")
         open(input,"w") do io
             println(io,"ROOTPlotsGraph\t1")
             println(io,join(("DRAWLAYOUT",figure.size...,figure.layout...,length(figure.panels)),'\t'))
             write_figure_grid(io,figure,payloads,decorations,Ref(0))
             println(io,"END\t",length(figure.panels))
         end
-        config=find_root_config(root_config)
-        config===nothing && throw(ArgumentError("local native ROOT not found"))
-        exe=graphfit_executable(config)
-        mkpath(dirname(outstem))
-        stem=joinpath(dir,"rendered")
-        run(Cmd([exe,input,stem]))
-        move_plot_outputs(stem,paths)
     end
-    return paths
 end
 render_root(panel::PlotPanel,stem::AbstractString;kwargs...) =
     render_root(PlotFigure([panel];size=panel.spec.size),stem;kwargs...)
@@ -448,8 +443,8 @@ Draw a native TH2D/TH3D (one `PlotPanel`); `kwargs` are panel keywords, e.g.
 `stats_position`, `stats_name`.
 """
 render_root(h::Hist2D,spec::Union{Graph2DSpec,Graph3DSpec},stem::AbstractString;
-            format=:png,root_config=nothing,kwargs...) =
-    render_root(PlotPanel(h,spec;kwargs...),stem;format,root_config)
+            format=:png,provenance::Bool=false,root_config=nothing,kwargs...) =
+    render_root(PlotPanel(h,spec;kwargs...),stem;format,provenance,root_config)
 render_root(h::Hist3D,spec::Graph3DSpec,stem::AbstractString;
-            format=:png,root_config=nothing,kwargs...) =
-    render_root(PlotPanel(h,spec;kwargs...),stem;format,root_config)
+            format=:png,provenance::Bool=false,root_config=nothing,kwargs...) =
+    render_root(PlotPanel(h,spec;kwargs...),stem;format,provenance,root_config)

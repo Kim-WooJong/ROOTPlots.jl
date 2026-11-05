@@ -24,6 +24,7 @@
 #include <THLimitsFinder.h>
 #include <TH3D.h>
 #include <TLegend.h>
+#include <TLegendEntry.h>
 #include <TList.h>
 #include <TLatex.h>
 #include <TLine.h>
@@ -103,6 +104,7 @@ void color(const std::string &s) {
 }
 #include "axisstyle.hpp"
 #include "experiment.hpp"
+#include "outputs.hpp"
 struct Point { double x,y,exl,exh,eyl,eyh; };
 struct Series {
   std::string kind,draw,errors,label,hex;
@@ -133,10 +135,12 @@ bool visible_errors(const Series &s) {
   std::transform(option.begin(),option.end(),option.begin(),[](unsigned char c){return std::toupper(c);});
   return option.find('X')==std::string::npos;
 }
+// Points need positive coordinates on a log axis. Error bars reaching zero or
+// below are allowed: ROOT's painter clips them at the frame edge.
 void validate_series_log(const Series &s,bool logx,bool logy) {
   for(const auto &p:s.points) {
-    check(!logx || (p.x>0 && (!visible_errors(s) || p.x-p.exl>0)),"log x needs positive visible graph extents");
-    check(!logy || (p.y>0 && (!visible_errors(s) || p.y-p.eyl>0)),"log y needs positive visible graph extents");
+    check(!logx || p.x>0,"log x needs positive graph x values");
+    check(!logy || p.y>0,"log y needs positive graph y values");
   }
 }
 bool filled_graph(const Series &s) {
@@ -283,6 +287,8 @@ Scene read_scene(const std::vector<std::vector<std::string>> &rows,size_t &at) {
   s.active=true;
   // The request's ROOT style was selected in main() before any object existed.
   if(at<rows.size() && rows[at][0]=="ROOTSTYLE") { check(rows[at].size()==2,"invalid ROOTSTYLE"); ++at; }
+  // cmsCanvas geometry, applied to gStyle in main() (apply_cms_canvas).
+  if(at<rows.size() && rows[at][0]=="CMSCANVAS") { check(rows[at].size()==3,"invalid CMSCANVAS"); ++at; }
   check(at<rows.size() && rows[at].size()==1+CV_FIELDS && rows[at][0]=="CANVAS","invalid CANVAS");
   s.canvas.assign(rows[at].begin()+1,rows[at].end()); ++at;
   for(int i=0;i<4;++i) if(s.canvas[i]!="-") {
@@ -528,8 +534,7 @@ void draw(const std::vector<std::vector<std::string>> &rows, const std::string &
   if(!root_title(canvas,frame,title,scene.canvas) && !title.empty()) heading.DrawLatex(0.13,0.94,title.c_str());
   canvas.Modified(); canvas.Update();
   finish_canvas(canvas);
-  canvas.SaveAs((stem+".png").c_str());
-  canvas.SaveAs((stem+".pdf").c_str());
+  save_outputs(canvas,stem);
 }
 std::string hist_draw_option(const std::string &mode) {
   if(mode=="hist") return "HIST";
@@ -742,8 +747,7 @@ void draw_hist(const std::vector<std::vector<std::string>> &rows, const std::str
   if(!root_title(canvas,frame,title,scene.canvas) && !title.empty()) heading.DrawLatex(0.13,0.94,title.c_str());
   canvas.Modified(); canvas.Update();
   finish_canvas(canvas);
-  canvas.SaveAs((stem+".png").c_str());
-  canvas.SaveAs((stem+".pdf").c_str());
+  save_outputs(canvas,stem);
 }
 void draw_hist_overlay(const std::vector<std::vector<std::string>> &rows,
                        const std::string &stem) {
@@ -870,8 +874,7 @@ void draw_hist_overlay(const std::vector<std::vector<std::string>> &rows,
   if(!root_title(canvas,hists.front().get(),title,scene.canvas) && !title.empty()) heading.DrawLatex(0.13,0.94,title.c_str());
   canvas.Modified(); canvas.Update();
   finish_canvas(canvas);
-  canvas.SaveAs((stem+".png").c_str());
-  canvas.SaveAs((stem+".pdf").c_str());
+  save_outputs(canvas,stem);
 }
 void draw_fit(const std::vector<std::vector<std::string>> &rows, const std::string &stem) {
   size_t at=0;
@@ -893,6 +896,23 @@ void draw_fit(const std::vector<std::vector<std::string>> &rows, const std::stri
   check(scene.lines.empty() && scene.texts.empty() && !scene.legend && scene.canvas[0]=="-" &&
         scene.canvas[1]=="-" && scene.canvas[2]=="-" && scene.canvas[3]=="-" && scene.axes[0].bins.empty(),
         "the fit/pull layout supports axis styles, grids, ticks and the title box only");
+  // FITHIST: the fitted histogram's visible bins (BIN index, low edge, high
+  // edge, sum w, sum w^2). The upper pad draws it as a native TH1D, so empty
+  // bins and error bars reaching zero on a log axis behave as for any TH1.
+  check(at<rows.size() && rows[at].size()==2 && rows[at][0]=="FITHIST","missing FITHIST");
+  const int nbins=integer(rows[at++][1]);
+  check(nbins>=1 && nbins<=1000000,"invalid FITHIST bin count");
+  std::vector<double> hist_edges,hist_values,hist_variances;
+  for(int i=1;i<=nbins;++i) {
+    check(at<rows.size() && rows[at].size()==6 && rows[at][0]=="BIN" && integer(rows[at][1])==i,"invalid FITHIST BIN");
+    const auto &b=rows[at++];
+    const double left=real(b[2]),right=real(b[3]),value=real(b[4]),variance=real(b[5]);
+    check(left<right && (hist_edges.empty() || left==hist_edges.back()) && variance>=0,
+          "invalid FITHIST bin geometry/variance");
+    if(hist_edges.empty()) hist_edges.push_back(left);
+    hist_edges.push_back(right); hist_values.push_back(value); hist_variances.push_back(variance);
+  }
+  check(!logx || hist_edges.front()>0,"log x needs positive bin edges");
   std::vector<Series> series;
   for(int id=1;id<=3;++id) series.push_back(read_series(rows,at,id));
   check(at+1==rows.size() && rows[at].size()==2 && rows[at][0]=="END" &&
@@ -919,6 +939,15 @@ void draw_fit(const std::vector<std::vector<std::string>> &rows, const std::stri
   for(auto *pad:{top,bottom}) apply_canvas(*pad,scene); // grids/ticks on both pads
   std::vector<std::unique_ptr<TGraph>> graphs;
   for(const auto &s:series) graphs.push_back(make_graph(s));
+  // Data: TH1D with the data series' style, drawn "E1 X0" (the graph's error
+  // bars with caps, no bin-width x bars). ROOT skips empty bins and bins below
+  // a log frame, and clips error bars at the frame edge.
+  auto data=std::make_unique<TH1D>("rootplots_fit_data","",nbins,hist_edges.data());
+  data->SetDirectory(nullptr); data->Sumw2(); data->SetStats(kFALSE);
+  for(int i=1;i<=nbins;++i) { data->SetBinContent(i,hist_values[i-1]); data->SetBinError(i,std::sqrt(hist_variances[i-1])); }
+  data->SetMarkerColor(TColor::GetColor(series[1].hex.c_str())); data->SetLineColor(TColor::GetColor(series[1].hex.c_str()));
+  data->SetMarkerStyle(series[1].marker); data->SetMarkerSize(series[1].marker_size);
+  data->SetLineWidth(series[1].line_width); data->SetLineStyle(series[1].line_style);
 
   top->cd();
   auto *upper=top->DrawFrame(xmin,ymin,xmax,ymax);
@@ -934,7 +963,7 @@ void draw_fit(const std::vector<std::vector<std::string>> &rows, const std::stri
   upper->GetXaxis()->SetLabelSize(0); upper->GetXaxis()->SetTitleSize(0);
   apply_axis_spec(upper->GetYaxis(),scene.axes[1],"y");
   graphs[0]->Draw(draw_option(series[0]).c_str());
-  graphs[1]->Draw(draw_option(series[1]).c_str());
+  data->Draw("E1 X0 SAME");
   std::unique_ptr<TLegend> legend;
   std::vector<std::string> legend_labels;
   for(int i=0;i<2;++i) if(!series[i].label.empty()) legend_labels.push_back(series[i].label);
@@ -942,7 +971,7 @@ void draw_fit(const std::vector<std::vector<std::string>> &rows, const std::stri
     // The upper pad is 70% of the canvas: 0.045 of it matches its 0.043 y labels.
     legend=automatic_legend(corner,legend_labels,StatsRect(),styled ? 0.8*gStyle->GetLabelSize("X")*two_pad_text(top).k : 0.045);
     if(!series[0].label.empty()) legend->AddEntry(graphs[0].get(),series[0].label.c_str(),"l");
-    if(!series[1].label.empty()) legend->AddEntry(graphs[1].get(),series[1].label.c_str(),"pe");
+    if(!series[1].label.empty()) legend->AddEntry(data.get(),series[1].label.c_str(),"pe");
     legend->Draw();
   }
   TLatex heading;
@@ -966,8 +995,7 @@ void draw_fit(const std::vector<std::vector<std::string>> &rows, const std::stri
 
   canvas.cd(); canvas.Modified(); canvas.Update();
   finish_canvas(canvas);
-  canvas.SaveAs((stem+".png").c_str());
-  canvas.SaveAs((stem+".pdf").c_str());
+  save_outputs(canvas,stem);
 }
 std::string formula(const std::string &model) {
   if(model=="pol0" || model=="pol1" || model=="pol2" || model=="gaus") return model;
@@ -1096,8 +1124,7 @@ void palette(const std::string &name) {
 void save(TCanvas &canvas, const std::string &stem) {
   canvas.Modified(); canvas.Update();
   finish_canvas(canvas);
-  canvas.SaveAs((stem+".png").c_str());
-  canvas.SaveAs((stem+".pdf").c_str());
+  save_outputs(canvas,stem);
 }
 void draw_grid(const std::vector<std::vector<std::string>> &rows, const std::string &stem) {
   size_t at=0;
@@ -1625,12 +1652,15 @@ int main(int argc,char **argv) {
       for(const auto &name:available_styles()) std::cout<<name<<'\n';
       return 0;
     }
-    check(argc==3,"usage: rootplots-graphfit input.tsv output | --styles | --image-diff a.png b.png | --image-chroma a.png | --image-ink a.png [x0 y0 x1 y1]");
+    check(argc==3 || argc==4,"usage: rootplots-graphfit input.tsv output [--formats=png|pdf|png,pdf] | --styles | --image-diff a.png b.png | --image-chroma a.png | --image-ink a.png [x0 y0 x1 y1]");
+    if(argc==4) set_output_formats(argv[3]);   // before reading the request
     gROOT->SetBatch(kTRUE);
     quiet_root();
     gStyle->SetOptStat(0); gStyle->SetOptFit(0); gStyle->SetOptTitle(0);
     auto rows=read_input(argv[1]);
+    validate_cms_canvas_rows(rows);           // stray or malformed cmsCanvas options
     select_requested_style(rows,"ROOTSTYLE"); // before any canvas or histogram is created
+    apply_cms_canvas(rows);                    // cmsCanvas margins and title offsets (single pads)
     if(rows[0][0]=="DRAW") draw(rows,argv[2]);
     else if(rows[0][0]=="DRAWHIST" || rows[0][0]=="DRAWHISTRAW") draw_hist(rows,argv[2]);
     else if(rows[0][0]=="DRAWHISTOVERLAY") draw_hist_overlay(rows,argv[2]);

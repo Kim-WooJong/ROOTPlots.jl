@@ -367,3 +367,74 @@ if TEST_NATIVE_ROOT
         end
     end
 end
+
+@testset "ROOT entries: known or unknown, with or without unbinned moments" begin
+    # Unknown entries mean ROOT's effective entries as TH1::ResetStats computes them
+    # (ROOT 6.40: (Σw)²/Σw² over all bins including under/overflow), with or without
+    # supplied moments, never the number of SetBinContent calls (visible + flow bins).
+    x = [-2.0, 0.25, 0.5, 0.75, 1.5, 1.75, 2.5, 3.0, 9.0]
+    w = [1.0, 2.0, 1.0, 0.5, 1.0, 1.5, 0.25, 1.0, 3.0]
+    edges = [0.0, 1.0, 2.0, 3.0]
+    inside = 0 .<= x .< 3
+    if TEST_NATIVE_ROOT
+        for weights in (nothing, w)
+            h = (weights === nothing ? histogram(x, edges; threads=:off) :
+                                       histogram(x, edges; weights, threads=:off)).hist
+            wall = weights === nothing ? ones(length(x)) : weights
+            wi = wall[inside]
+            effective = sum(wall)^2 / sum(wall .^ 2)        # ResetStats in ROOT 6.40
+            in_range = sum(wi)^2 / sum(wi .^ 2)              # older ROOT releases
+            unbinned_mean = sum(wi .* x[inside]) / sum(wi)
+            flows = (underflow=h.underflow, overflow=h.overflow)
+            variants = [h,                                                           # known, moments
+                        Hist1D(h.edges, h.sumw, h.sumw2; flows..., entries=h.entries), # known, no moments
+                        Hist1D(h.edges, h.sumw, h.sumw2; flows..., moments=h.moments), # unknown, moments
+                        Hist1D(h.edges, h.sumw, h.sumw2; flows...)]                    # unknown, no moments
+            boxes = with_stats_dump() do dir
+                for (k, v) in enumerate(variants)
+                    render_root(v, GraphSpec(), joinpath(dir, "h$k"); draw=:e1,
+                                stats=(:entries, :mean, :std, :underflow, :overflow))
+                end
+            end
+            @test length(boxes) == 4
+            @test boxes[1].values["entries"] == boxes[2].values["entries"] == length(x)
+            @test boxes[3].values["entries"] == boxes[4].values["entries"]  # same ROOT rule
+            @test any(v -> isapprox(boxes[4].values["entries"], v; rtol=1e-12), (effective, in_range))
+            @test boxes[3].values["entries"] != length(h.sumw) + 2          # the old SetBinContent count
+            # Unbinned moments stay intact; without them ROOT uses bin centres.
+            @test boxes[1].values["mean1"] ≈ unbinned_mean rtol=1e-12
+            @test boxes[3].values["mean1"] ≈ unbinned_mean rtol=1e-12
+            @test boxes[4].values["mean1"] ≈ binned_mean(h) rtol=1e-12
+            @test all(b -> parse(Float64, box_value(b, "Underflow")) == h.underflow[1], boxes)
+            @test all(b -> parse(Float64, box_value(b, "Overflow")) == h.overflow[1], boxes)
+            weights === nothing &&
+                @test parse(Int, box_value(boxes[3], "Entries")) in (length(x), count(inside))
+        end
+        # Hist2D and Hist3D share the route.
+        xs, ys = [0.5, 1.5, -1.0, 0.5, 2.5, 1.2], [0.5, 0.5, 0.5, 3.0, 1.5, 1.7]
+        ws = [2.0, 1.0, 1.0, 1.0, 1.0, 0.5]
+        h2 = histogram((xs, ys), ([0.0, 1.0, 2.0], [0.0, 1.0, 2.0]); weights=ws, threads=:off).hist
+        u2 = Hist2D(h2.xedges, h2.yedges, h2.sumw, h2.sumw2; bins_with_flow=h2.bins_with_flow, moments=h2.moments)
+        zs = [0.5, 0.5, 0.5, 0.5, 0.5, 0.5]
+        h3 = histogram((xs, ys, zs), ([0.0, 1.0, 2.0], [0.0, 1.0, 2.0], [0.0, 1.0]); threads=:off).hist
+        u3 = Hist3D(h3.xedges, h3.yedges, h3.zedges, h3.sumw, h3.sumw2; bins_with_flow=h3.bins_with_flow,
+                    moments=h3.moments)
+        nd = with_stats_dump() do dir
+            render_root(h2, Graph2DSpec(), joinpath(dir, "k2"); stats=true)
+            render_root(u2, Graph2DSpec(), joinpath(dir, "u2"); stats=true)
+            render_root(h3, Graph3DSpec(), joinpath(dir, "k3"); stats=true)
+            render_root(u3, Graph3DSpec(), joinpath(dir, "u3"); stats=true)
+        end
+        in2 = [(0 <= a < 2) && (0 <= b < 2) for (a, b) in zip(xs, ys)]
+        @test length(nd) == 4
+        @test nd[1].values["entries"] == length(xs) && nd[3].values["entries"] == length(xs)
+        @test any(v -> isapprox(nd[2].values["entries"], v; rtol=1e-12),
+                  (sum(ws)^2 / sum(ws .^ 2), sum(ws[in2])^2 / sum(ws[in2] .^ 2)))
+        @test nd[4].values["entries"] in (length(xs), count(in2))
+        @test nd[2].values["entries"] != 4 + 3 && nd[4].values["entries"] != 4 + 3   # old count
+        @test nd[2].values["mean1"] ≈ nd[1].values["mean1"] rtol=1e-12   # unbinned moments kept
+        @test nd[4].values["mean2"] ≈ nd[3].values["mean2"] rtol=1e-12
+    else
+        @test_skip false
+    end
+end

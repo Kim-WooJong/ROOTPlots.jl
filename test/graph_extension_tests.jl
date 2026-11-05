@@ -19,7 +19,8 @@
         @test_throws ArgumentError GraphSeries(x,y;draw=option)
     end
     low=GraphSeries([1.,2.],[.2,.3];yerrors=[.3,.1],errors=:band)
-    @test_throws ArgumentError ROOTPlots.graph_limits([low],GraphSpec(logy=true))
+    # A band reaching zero on log y is drawn and clipped at the frame by ROOT.
+    @test 0 < ROOTPlots.graph_limits([low],GraphSpec(logy=true))[2][1] < .2
     @test ROOTPlots.graph_limits([GraphSeries(x,y;draw=:bar)],GraphSpec())[2][1]<0
     sampled=function_curve(t->t^2,(1.,4.);n=7,label="Julia sampled")
     @test sampled.x==collect(range(1.,4.;length=7))
@@ -65,7 +66,7 @@
             for broken in (replace(original,"#336699\t3004\t0.6"=>"#336699\t3004\t2.0"),
                            replace(original,"points\tband"=>"ROOT:AP\tband"))
                 write(path,broken)
-                @test !success(pipeline(Cmd([executable,path,joinpath(dir,"bad")]);stdout=devnull,stderr=devnull))
+                @test rejects_request(executable,path,joinpath(dir,"bad"))
             end
         end
     end
@@ -111,7 +112,7 @@ end
             for broken in (replace(original,"plain\t1\t2\t1"=>"plain\t0\t2\t1"),
                            replace(original,"POINT3\t5\t0.4\t0.6"=>"POINT3\t5\t0.0\t0.0"))
                 write(path,broken)
-                @test !success(pipeline(Cmd([executable,path,joinpath(dir,"bad")]);stdout=devnull,stderr=devnull))
+                @test rejects_request(executable,path,joinpath(dir,"bad"))
             end
         end
     end

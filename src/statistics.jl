@@ -171,7 +171,7 @@ end
     render_root(h::Hist1D, spec::GraphSpec, outstem; draw=:steps, label="Histogram",
                 style=GraphStyle(), stats=false, fitstats=false, stats_position=:auto,
                 stats_name=nothing, stats_headroom=false, attached_fit=nothing, fit_label="",
-                format=:png)
+                format=:png, provenance=false)
 
 Render a standalone histogram. `draw=:steps` (default) is a step line with a
 visible zero baseline on linear y axes; other presets and ROOT option strings
@@ -205,11 +205,12 @@ a box or attached fit is requested.
 function render_root(h::Hist1D, spec::GraphSpec, outstem::AbstractString;
                      draw=:steps, label="Histogram", style=GraphStyle(), format=:png,
                      stats=false, fitstats=false, stats_position=:auto, stats_name=nothing,
-                     stats_headroom=false, attached_fit=nothing, fit_label="", root_config=nothing)
+                     stats_headroom=false, attached_fit=nothing, fit_label="", provenance::Bool=false,
+                     root_config=nothing)
     box = (; stats, fitstats, stats_position, stats_name, stats_headroom, attached_fit, fit_label)
     if draw isa AbstractString && uppercase(strip(draw)) != "STEPS"
         return render_hist_root(h, spec, outstem;
-                                mode=String(draw), label, style, format, box..., root_config)
+                                mode=String(draw), label, style, format, box..., provenance, root_config)
     end
     mode = hist_draw_mode(draw)
     # Statistics/fit boxes and bin labels belong to a native TH1D, so :steps then draws HIST.
@@ -217,7 +218,7 @@ function render_root(h::Hist1D, spec::GraphSpec, outstem::AbstractString;
              spec.xaxis.bin_labels !== nothing
     mode == :steps && native && (mode = :hist)
     mode == :steps || return render_hist_root(h, spec, outstem;
-                                            mode, label, style, format, box..., root_config)
+                                            mode, label, style, format, box..., provenance, root_config)
     line = histogram_steps(h; label, style)
     ylimits = spec.ylimits
     if ylimits === nothing && !spec.logy
@@ -235,7 +236,7 @@ function render_root(h::Hist1D, spec::GraphSpec, outstem::AbstractString;
                              xlimits=spec.xlimits === nothing ?
                                      (first(h.edges), last(h.edges)) : spec.xlimits,
                              ylimits)
-    return render_root([line], display_spec, outstem; format, root_config)
+    return render_root([line], display_spec, outstem; format, provenance, root_config)
 end
 
 """Display valid χ² histogram-fit pulls as graph points; invalid bins are omitted."""
@@ -268,17 +269,40 @@ function validate_fit_pull_scene(spec::GraphSpec)
     return spec
 end
 
+"""Upper-pad (x, y) range of the fit/pull layout. On a log y axis the range
+follows what ROOT draws of the histogram, as for a TH1: bins with positive
+content (a TH1 skips the others) and the positive part of their error bars
+(bars reaching zero are clipped at the frame). The fit curve can raise the
+maximum; curve values below the data are clipped by the frame."""
+function fit_pull_limits(curve::GraphSeries, data::GraphSeries, h::Hist1D, spec::GraphSpec)
+    spec.logy || return graph_limits([curve, data], spec)
+    keep = findall(>(0), h.sumw)
+    isempty(keep) && throw(ArgumentError("log y needs at least one histogram bin with positive content"))
+    shown = GraphSeries[GraphSeries(data.x[keep], data.y[keep]; yerrors=data.eylow[keep])]
+    lowest = minimum(y - e > 0 ? y - e : y for (y, e) in zip(data.y[keep], data.eylow[keep]))
+    above = findall(>=(lowest), curve.y)
+    isempty(above) ||
+        push!(shown, GraphSeries(curve.x[above], curve.y[above]; draw=:line, errors=:none))
+    return graph_limits(shown, spec)
+end
+
 """Render a χ² histogram fit and its valid-bin pulls in aligned ROOT pads.
 
-The upper pad shows every visible bin, while the curve and pull points use the
-fit's range. The caller must supply the result of `fit_root(h, ...)`; FitResult
-does not retain source-data identity. `spec.logy` applies only to the upper pad.
+The upper pad shows every visible bin as a native ROOT TH1D drawn with `E1 X0`
+(markers and error bars with caps, no bin-width x bars), while the curve and
+pull points use the fit's range. As for any TH1, ROOT skips empty bins and, on
+a log y axis (`spec.logy`, upper pad only), bins below the frame; error bars
+reaching zero are clipped at the frame edge. The automatic log range follows the
+drawn bins (the fit curve may raise the maximum; below the data it is clipped by
+the frame); without any positive bin a log y axis is an error. The caller must
+supply the result of `fit_root(h, ...)`; FitResult does not retain source-data
+identity.
 """
 function render_root(h::Hist1D, fit::FitResult, spec::GraphSpec, outstem::AbstractString;
                      pull_limits=nothing, curve_samples::Int=300,
                      data_label="Histogram", fit_label="ROOT fit",
                      data_style=GraphStyle(), fit_style=GraphStyle(color="#cc3311"),
-                     pull_style=GraphStyle(), format=:png, root_config=nothing)
+                     pull_style=GraphStyle(), format=:png, provenance::Bool=false, root_config=nothing)
     paths = plot_output_paths(outstem, format)
     validate_fit_pull_scene(spec)
     validate_stats_hist(h)
@@ -293,23 +317,15 @@ function render_root(h::Hist1D, fit::FitResult, spec::GraphSpec, outstem::Abstra
                              logy=spec.logy, legend=spec.legend, size=spec.size,
                              xaxis=spec.xaxis, yaxis=spec.yaxis, canvas=spec.canvas,
                              style=spec.style, cms_label=spec.cms_label, atlas_label=spec.atlas_label)
-    limits = graph_limits([curve, data], display_spec)
+    limits = fit_pull_limits(curve, data, h, display_spec)
     span = max(3.0, 1.2 * maximum(abs, pull.y))
     ylim = pull_limits === nothing ? (-span, span) : Tuple(Float64.(pull_limits))
     length(ylim) == 2 && all(isfinite, ylim) && ylim[1] < 0 < ylim[2] ||
         throw(ArgumentError("pull limits must be finite, increasing, and contain zero"))
-    config = find_root_config(root_config)
-    config === nothing && throw(ArgumentError("local native ROOT not found"))
-    exe = graphfit_executable(config)
-    mkpath(dirname(outstem))
-    mktempdir() do dir
-        input = joinpath(dir,"fit-plot.tsv")
-        write_fit_plot_spec(input,[curve,data,pull],display_spec,limits,ylim)
-        stem = joinpath(dir,"rendered")
-        run(Cmd([exe,input,stem]))
-        move_plot_outputs(stem,paths)
+    return render_request(paths, outstem, graphfit_backend(root_config);
+                          operation="fit/pull rendering", provenance, name="fit-plot.tsv") do input
+        write_fit_plot_spec(input,[curve,data,pull],display_spec,limits,ylim,h)
     end
-    return paths
 end
 
 """Asymptotic upper-tail χ² probability for valid χ² or unweighted Poisson fits.

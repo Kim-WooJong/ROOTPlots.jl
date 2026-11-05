@@ -12,9 +12,13 @@ No ROOT distribution or precompiled ROOT libraries are bundled here.
 | DataFrames.jl | Table-to-histogram adapters and analysis | [MIT](https://github.com/JuliaData/DataFrames.jl) |
 | CSV.jl | Read/write input tables | [MIT](https://github.com/JuliaData/CSV.jl) |
 
-The `"CMS"` plot style (`backend/root/experiment.hpp`) is original code written with
-ROOT `TStyle` setters; its values follow the publicly documented CMS publication
-style conventions, and no CMS software is included. `"ATLAS"` is ROOT's built-in
+The `"CMS"` plot style (`backend/root/experiment.hpp`) is original C++ code written
+with ROOT `TStyle` setters and `TLatex`; its parameter values and layout formulas
+(`setCMSStyle`, `cmsCanvas`, `CMS_lumi`) follow the CMS Collaboration's cmsstyle
+package ([MIT, CMS Common Analysis Tools](https://github.com/cms-cat/cmsstyle)), as of
+upstream commit [`ecfed5a18a7a`](https://github.com/cms-cat/cmsstyle/tree/ecfed5a18a7a8da5e49bfce903e40e0f5769c4f1)
+(`ecfed5a18a7a8da5e49bfce903e40e0f5769c4f1`, `cmsstyle.py`). No
+cmsstyle or other CMS software is included or required. `"ATLAS"` is ROOT's built-in
 style. The CMS and ATLAS labels are for collaboration use under each
 collaboration's publication rules; the package only provides the styling.
 

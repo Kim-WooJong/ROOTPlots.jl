@@ -16,6 +16,8 @@ is used only when the histogram is drawn by native ROOT (e.g. in a statistics bo
 [`histogram`](@ref) sets all of them. A histogram built directly from bin
 contents keeps the defaults: zero flows, unknown entries (ROOT then shows the
 effective entries `(Σw)²/Σw²`, as `TH1::ResetStats` does), and bin-centre moments.
+With `moments` but unknown `entries`, ROOT shows the unbinned Mean/Std Dev and
+the same `ResetStats` effective entries: an effective count, not a fill count.
 """
 struct Hist1D
     edges::Vector{Float64}

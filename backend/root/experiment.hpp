@@ -16,41 +16,45 @@ std::string lowercase_ascii(std::string s) {
   return s;
 }
 
-// "CMS" TStyle, built from ROOT TStyle setters with values that follow the
-// public CMS publication style conventions (white canvas/pad/frame without
-// borders, no statistics or title box, Helvetica (font 42) text, large axis
-// titles and labels, ticks on all four frame sides). ROOT has no built-in CMS
-// style; this one is created once per process and registered in gROOT's style
-// list, so it is selected like ROOT's own styles.
+// "CMS" TStyle with the values of the CMS Collaboration's cmsstyle package
+// (https://github.com/cms-cat/cmsstyle, cmsstyle.py at commit
+// ecfed5a18a7a8da5e49bfce903e40e0f5769c4f1; setCMSStyle): white canvas/pad/frame
+// without borders, no statistics or title box, Helvetica (font 42) text, large
+// axis titles and labels, ticks on all four frame sides. ROOT has no built-in
+// CMS style; this one is created once per process from ROOT TStyle setters and
+// registered in gROOT's style list, so it is selected like ROOT's own styles.
+// Kept deviations: SetOptFit(1) is not used (the package's fit boxes are
+// opt-in), no gROOT->ForceStyle, no TColor::DefinedColors.
 TStyle *cms_style() {
   if(TStyle *existing=gROOT->GetStyle("CMS")) return existing;
-  auto *s=new TStyle("CMS","CMS publication style conventions");
+  auto *s=new TStyle("CMS","CMS style (cmsstyle setCMSStyle values)");
   // Canvas, pads and frame: white, no borders, no grid.
   s->SetCanvasBorderMode(0); s->SetCanvasColor(kWhite);
+  s->SetCanvasDefH(600); s->SetCanvasDefW(600); s->SetCanvasDefX(0); s->SetCanvasDefY(0);
   s->SetPadBorderMode(0); s->SetPadColor(kWhite); s->SetPadGridX(false); s->SetPadGridY(false);
   s->SetGridColor(0); s->SetGridStyle(3); s->SetGridWidth(1);
   s->SetFrameBorderMode(0); s->SetFrameBorderSize(1); s->SetFrameFillColor(0); s->SetFrameFillStyle(0);
   s->SetFrameLineColor(1); s->SetFrameLineStyle(1); s->SetFrameLineWidth(1);
   // Histograms, markers, error bars and functions.
   s->SetHistLineColor(1); s->SetHistLineStyle(0); s->SetHistLineWidth(1);
-  s->SetEndErrorSize(2); s->SetMarkerStyle(20);
-  s->SetFuncColor(2); s->SetFuncStyle(1); s->SetFuncWidth(2);
+  s->SetEndErrorSize(2); s->SetMarkerStyle(20); s->SetMarkerSize(1);
+  s->SetFuncColor(2); s->SetFuncStyle(1); s->SetFuncWidth(1);
   // No date/file/statistics/title boxes; box formats when a box is requested.
   s->SetOptDate(0); s->SetOptFile(0); s->SetOptStat(0); s->SetOptFit(0); s->SetOptTitle(0);
   s->SetFitFormat("5.4g"); s->SetStatFormat("6.4g");
   s->SetStatColor(kWhite); s->SetStatFont(42); s->SetStatFontSize(0.025); s->SetStatTextColor(1);
   s->SetStatBorderSize(1); s->SetStatH(0.1); s->SetStatW(0.15);
-  // Pad margins (fractions of the pad): room for the large axis titles and the
-  // label/luminosity line above the frame.
-  s->SetPadTopMargin(0.08); s->SetPadBottomMargin(0.13);
-  s->SetPadLeftMargin(0.16); s->SetPadRightMargin(0.04);
+  // Pad margins (fractions of the pad). Single-pad canvases replace them with
+  // the cmsCanvas geometry (apply_cms_canvas).
+  s->SetPadTopMargin(0.05); s->SetPadBottomMargin(0.13);
+  s->SetPadLeftMargin(0.16); s->SetPadRightMargin(0.02);
   // Plot title box (only drawn with CanvasStyle(opt_title=true)).
   s->SetTitleFont(42); s->SetTitleColor(1); s->SetTitleTextColor(1); s->SetTitleFillColor(10);
   s->SetTitleFontSize(0.05); s->SetTitleBorderSize(0);
   // Axis titles and labels.
   s->SetTitleColor(1,"XYZ"); s->SetTitleFont(42,"XYZ"); s->SetTitleSize(0.06,"XYZ");
-  s->SetTitleXOffset(0.9); s->SetTitleYOffset(1.25);
-  s->SetLabelColor(1,"XYZ"); s->SetLabelFont(42,"XYZ"); s->SetLabelOffset(0.007,"XYZ");
+  s->SetTitleXOffset(1.1); s->SetTitleYOffset(1.35);
+  s->SetLabelColor(1,"XYZ"); s->SetLabelFont(42,"XYZ"); s->SetLabelOffset(0.012,"XYZ");
   s->SetLabelSize(0.05,"XYZ");
   // Axes: ticks on both sides of the frame.
   s->SetAxisColor(1,"XYZ"); s->SetStripDecimals(kTRUE); s->SetTickLength(0.03,"XYZ");
@@ -58,9 +62,10 @@ TStyle *cms_style() {
   s->SetOptLogx(0); s->SetOptLogy(0); s->SetOptLogz(0);
   // Text and legends.
   s->SetTextFont(42); s->SetTextSize(0.05);
-  s->SetLegendBorderSize(0); s->SetLegendFillColor(0); s->SetLegendFont(42);
-  // PostScript/PDF output.
+  s->SetLegendBorderSize(0); s->SetLegendFillColor(0); s->SetLegendFont(42); s->SetLegendTextSize(0.04);
+  // PostScript/PDF output and hatched fills.
   s->SetPaperSize(20.,20.);
+  s->SetHatchesLineWidth(2); s->SetHatchesSpacing(1.3);
   return s;
 }
 
@@ -110,29 +115,99 @@ template<class Rows> void select_requested_style(const Rows &rows,const std::str
   if(!name.empty()) select_root_style(name);
 }
 
+// cmsstyle's cmsCanvas geometry for a single-pad canvas of W x H pixels under
+// the CMS style (CMSCANVAS row: extraSpace, yTitOffset or "-"). cmsCanvas sizes
+// its canvas 600x600 (square) or 800x600 and sets, in pixels of H_ref = 600,
+// T = 0.07 H, B = 0.125 H, L = 0.145 H, R = 0.05 H, with the left margin
+// adjusted for the y title offset (default 1.2 square, 0.78 otherwise):
+// L += 50 o - 60 (o < 1.5) or 35 (o - 1.4) + 25 (1.5 <= o < 1.8); margins
+// L/W + extraSpace, R/W, T/H, B/H + 0.02; frame title offsets x 1.05, y o.
+// Other canvas sizes scale the pixel lengths with H (identical for 600x600 and
+// 800x600). Set as gStyle values before any pad or histogram exists, so
+// explicit CanvasStyle/AxisStyle settings still win. Two-pad views (fit/pull),
+// multi-panel figures, 3-D views and requests without the row keep the style.
+// CMSCANVAS rows: Julia writes at most one per scene, right after the scene's
+// "ROOTSTYLE CMS" row. Stray (no CMS style), misplaced, duplicate, malformed or
+// out-of-range rows are rejected instead of being ignored.
+template<class Rows> void validate_cms_canvas_rows(const Rows &rows) {
+  for(size_t i=0;i<rows.size();++i) {
+    const auto &row=rows[i];
+    if(row.empty() || row[0]!="CMSCANVAS") continue;
+    check(i>=2 && rows[i-1].size()==2 && rows[i-1][0]=="ROOTSTYLE" &&
+          lowercase_ascii(rows[i-1][1])=="cms" && !rows[i-2].empty() && rows[i-2][0]=="SCENE",
+          "CMSCANVAS row must directly follow a scene's CMS ROOTSTYLE row");
+    check(row.size()==3,"invalid CMSCANVAS row: expected extra space and y title offset");
+    const double extra_space=real(row[1]);
+    check(extra_space>=0 && extra_space<0.5,"invalid CMSCANVAS extra space");
+    if(row[2]!="-") {
+      const double offset=real(row[2]);
+      check(offset>0 && offset<=10,"invalid CMSCANVAS y title offset");
+    }
+  }
+}
+
+template<class Rows> void apply_cms_canvas(const Rows &rows) {
+  if(lowercase_ascii(selected_style())!="cms" || rows.empty() || rows[0].size()<3) return;
+  const std::string &command=rows[0][0];
+  if(command=="FIT" || command=="DRAWFIT" || command=="DRAWVOLUME" || command=="DRAWXYZ" || command=="DRAWTF3") return;
+  const std::vector<std::string> *found=nullptr;
+  for(const auto &row:rows) {
+    if(row.empty()) continue;
+    if(row[0]=="SUBGRID") return; // nested figure: several pads
+    if(row[0]!="CMSCANVAS") continue;
+    check(row.size()==3,"invalid CMSCANVAS row");
+    if(found) return; // several pads: not a single-pad canvas
+    found=&row;
+  }
+  if(!found) return;
+  if(command=="DRAWLAYOUT" && !(rows[0].size()>=6 && rows[0][3]=="1" && rows[0][4]=="1" && rows[0][5]=="1")) return;
+  const double W=integer(rows[0][1]),H=integer(rows[0][2]);
+  if(!(W>0 && H>0)) return;
+  const double extra_space=real((*found)[1]);
+  const bool explicit_offset=(*found)[2]!="-";
+  const double offset=explicit_offset ? real((*found)[2]) : (W==H ? 1.2 : 0.78);
+  check(extra_space>=0 && extra_space<0.5 && offset>0 && offset<=10,"invalid CMSCANVAS values");
+  double left_px=0.145*600;
+  if(offset<1.5) left_px+=offset*50-60;
+  else if(offset<1.8) left_px+=(offset-1.4)*35+25;
+  const double scale=H/600;
+  const double left=left_px*scale/W+extra_space,right=0.05*600*scale/W;
+  check(left>0 && left+right<0.9,"CMSCANVAS margins do not fit the canvas");
+  gStyle->SetPadLeftMargin(left); gStyle->SetPadRightMargin(right);
+  gStyle->SetPadTopMargin(0.07); gStyle->SetPadBottomMargin(0.125+0.02);
+  gStyle->SetTitleXOffset(1.05); gStyle->SetTitleYOffset(offset);
+}
+
 // Experiment label of one pad (EXPLABEL row): kind ("CMS" or "ATLAS"),
 // position, extra text after/below the experiment name, text above the frame
-// on the right (CMS luminosity/energy), and further lines below the label.
+// on the right (CMS luminosity/energy), the CMS logo text (cmsstyle SetCmsText;
+// "CMS", may be empty), the CMS luminosity text scale (CMS_lumi scaleLumi), and
+// further lines below the label (CMS: cmsstyle AppendAdditionalInfo).
 struct ExperimentLabelSpec {
   bool active=false;
-  std::string kind,position,extra,right;
+  std::string kind,position,extra,right,cms_text="CMS";
+  double scale_lumi=1;
   std::vector<std::string> lines;
 };
 void label_text(const std::string &s) {
   check(s.find('\0')==std::string::npos && s.find('\r')==std::string::npos && s.size()<=512,"invalid label text");
 }
-// EXPLABEL kind position extra right nlines line...  ("-" = empty text)
+// EXPLABEL kind position extra right cms_text scale_lumi nlines line...
+// ("-" = empty text)
 ExperimentLabelSpec read_experiment_label(const std::vector<std::string> &f) {
-  check(f.size()>=6 && f[0]=="EXPLABEL","invalid EXPLABEL");
+  check(f.size()>=8 && f[0]=="EXPLABEL","invalid EXPLABEL");
   ExperimentLabelSpec l;
   l.active=true; l.kind=f[1]; l.position=f[2];
-  l.extra=f[3]=="-" ? "" : f[3]; l.right=f[4]=="-" ? "" : f[4];
+  l.extra=f[3]=="-" ? "" : f[3]; l.right=f[4]=="-" ? "" : f[4]; l.cms_text=f[5]=="-" ? "" : f[5];
+  l.scale_lumi=real(f[6]);
   check(l.kind=="CMS" || l.kind=="ATLAS","invalid experiment label kind");
-  check(l.position=="inside_left" || l.position=="inside_right" || l.position=="outside","invalid label position");
-  const int n=integer(f[5]);
-  check(n>=0 && n<=8 && f.size()==size_t(6+n),"invalid EXPLABEL line count");
-  for(int i=0;i<n;++i) l.lines.push_back(f[6+i]);
-  label_text(l.extra); label_text(l.right);
+  check(l.position=="inside_left" || l.position=="inside_right" || l.position=="outside" ||
+        (l.kind=="CMS" && l.position=="inside_center"),"invalid label position");
+  check(l.scale_lumi>0 && l.scale_lumi<=10,"invalid label luminosity scale");
+  const int n=integer(f[7]);
+  check(n>=0 && n<=8 && f.size()==size_t(8+n),"invalid EXPLABEL line count");
+  for(int i=0;i<n;++i) l.lines.push_back(f[8+i]);
+  label_text(l.extra); label_text(l.right); label_text(l.cms_text);
   for(const auto &s:l.lines) label_text(s);
   return l;
 }
@@ -202,9 +277,16 @@ double text_height_ndc(TVirtualPad *pad,const std::string &s,int font,double siz
 struct LabelText { double x,y; std::string s; int font; double size; int align; bool above; };
 
 // Texts of one label, positioned from the pad's current margins (gPad = pad).
-// CMS: bold "CMS" (font 61) with the extra text in italics (font 52), sizes
-// relative to the top margin as in CMS publications; the right text
-// (luminosity and energy, font 42) sits above the frame on the right.
+// CMS: cmsstyle's CMS_lumi geometry. Bold "CMS" (font 61, 0.75 t) and the extra
+// text in italics (font 52, 0.76 x the "CMS" size); the luminosity/energy text
+// (font 42, 0.6 t x scaleLumi) above the frame on the right at 1 - t + 0.2 t
+// (t = top margin). iPos 11/22/33 (inside_left/center/right): 0.035 of the
+// frame from its top and side, the extra text 1.2 x the "CMS" size lower, the
+// additional-info lines (font 42, extra-text size) further down in steps of
+// 0.6 x their size + 0.02. iPos 0 (outside): "CMS" at the frame's left edge
+// above the frame, the extra text after it at cmsstyle's offset
+// 0.043 x 52 x size("CMS") x min(W,H)/W. cmsstyle ignores additional info with
+// iPos 0; here those lines go inside the frame at the top left.
 // ATLAS: bold-italic "ATLAS" (font 72) followed by regular text (font 42),
 // further lines (energy/luminosity) below, at the style's text size. Outside
 // the frame, ATLAS puts "ATLAS <text>" on the left and the further lines,
@@ -225,21 +307,31 @@ std::vector<LabelText> label_layout(const LabelSlot &slot) {
   };
   const bool left=L.position!="inside_right";
   if(L.kind=="CMS") {
-    // Scaled with the (one-pad) top margin, capped for unusually tall margins.
-    const double tm=std::min(t*g.hr,0.1),cms=0.75*tm*g.k,extra=0.76*cms,small=0.6*tm*g.k;
-    const double above=1-t+0.2*tm/g.hr;
-    put(1-r,above,L.right,42,small,31,true);
-    double x=left ? l+0.045*fw : 1-r-0.045*fw, y=1-t-0.035*fh;
+    // Sizes follow the (one-pad) top margin t1, capped for unusually tall
+    // margins; vertical steps are one-pad NDC lengths, /hr in this pad.
+    const double t1=std::min(t*g.hr,0.1),cms=0.75*t1*g.k,extra=0.76*cms,lumi=0.6*t1*g.k*L.scale_lumi;
+    const double above=1-t+0.2*t1/g.hr;
+    const double cms_step=1.2*0.75*t1/g.hr,info_step=(0.6*0.76*0.75*t1+0.02)/g.hr;
+    put(1-r,above,L.right,42,lumi,31,true);
+    const double y0=1-t-0.035*fh;
     if(L.position=="outside") {
-      put(l,above,"CMS",61,cms,11,true);
-      put(l+text_width_ndc(pad,"CMS",61,cms)+text_gap_ndc(pad,cms),above,L.extra,52,extra,11,true);
-      for(const auto &line:L.lines) { put(x,y,line,42,small,13,false); y-=1.2*small*to_y; }
+      double x=l;
+      if(!L.cms_text.empty()) {
+        put(l,above,L.cms_text,61,cms,11,true);
+        x+=0.043*52*cms*(pw>0 && ph>0 ? std::min(pw,ph)/pw : 1);
+      }
+      put(x,above,L.extra,52,extra,11,true);
+      for(size_t i=0;i<L.lines.size();++i) put(l+0.035*fw,y0-i*info_step,L.lines[i],42,extra,13,false);
       return out;
     }
-    const int align=left ? 13 : 33;
-    put(x,y,"CMS",61,cms,align,false); y-=1.2*cms*to_y;
-    if(!L.extra.empty()) { put(x,y,L.extra,52,extra,align,false); y-=1.2*extra*to_y; }
-    for(const auto &line:L.lines) { put(x,y,line,42,small,align,false); y-=1.2*small*to_y; }
+    const bool centre=L.position=="inside_center";
+    const int align=centre ? 23 : left ? 13 : 33;
+    const double x=centre ? l+0.5*fw : left ? l+0.035*fw : 1-r-0.035*fw;
+    double y=y0;
+    if(!L.cms_text.empty()) { put(x,y,L.cms_text,61,cms,align,false); y-=cms_step; }
+    if(!L.extra.empty()) put(x,y,L.extra,52,extra,align,false);
+    else if(!L.cms_text.empty()) y+=cms_step;
+    for(size_t i=0;i<L.lines.size();++i) put(x,y-0.004/g.hr-(i+1)*info_step,L.lines[i],42,extra,align,false);
     return out;
   }
   const double size=gStyle->GetTextSize()*g.k;

@@ -63,8 +63,7 @@
             exe=ROOTPlots.graphfit_executable(ROOTPlots.find_root_config())
             malformed=joinpath(dir,"malformed.tsv")
             write(malformed,"ROOTPlotsGraph\t1\nDRAWLAYOUT\t800\t600\t1\t1\t1\nPANEL\t1\t999\nEND\t1\n")
-            process=run(pipeline(ignorestatus(`$exe $malformed $(joinpath(dir,"bad-native"))`);stdout=devnull,stderr=devnull))
-            @test process.exitcode==2
+            @test rejects_request(exe,malformed,joinpath(dir,"bad-native"))
             copies=rootmap(1:2;workers=2) do i
                 render_root(PlotFigure(panels[1:2]),joinpath(dir,"parallel-$i"))
             end

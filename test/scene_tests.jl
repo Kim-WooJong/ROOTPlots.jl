@@ -58,7 +58,7 @@ using SpecialFunctions: erf, erfc
                 replace(original,"ENDSCENE"=>"UNKNOWN"),
                 replace(original,"TEXT\t1\t1\t0.58"=>"TEXT\t1\t1\t1.58")))
                 write(input,broken)
-                @test !success(pipeline(`$exe $input $(joinpath(dir,"bad-$i"))`;stdout=devnull,stderr=devnull))
+                @test rejects_request(exe,input,joinpath(dir,"bad-$i"))
             end
             fit=fit_root(h,:pol0;initial=[2.])
             attachment=joinpath(dir,"attachment.tsv")
@@ -66,9 +66,8 @@ using SpecialFunctions: erf, erfc
                 ROOTPlots.raw_hist_draw_limits(h,spec,GraphStyle(),"Hist"),
                 "FUNC","Hist",GraphStyle();attached_fit=fit)
             write(attachment,replace(read(attachment,String),"LENTRY\tseries\t1"=>"LENTRY\tseries\t2"))
-            failed=run(pipeline(ignorestatus(`$exe $attachment $(joinpath(dir,"bad-attachment"))`);
-                stdout=devnull,stderr=devnull))
-            @test failed.exitcode==2 # A controlled validation error, never SIGSEGV during TH1 cleanup.
+            # A controlled validation error, never SIGSEGV during TH1 cleanup.
+            @test rejects_request(exe,attachment,joinpath(dir,"bad-attachment"))
             @test_throws ArgumentError render_root(h,fit,spec,joinpath(dir,"not-two-pad"))
         end
     end
@@ -118,7 +117,7 @@ end
             ROOTPlots.write_graph_series(io,[g])
             input=joinpath(dir,"bad-width.tsv");write(input,String(take!(io)))
             exe=ROOTPlots.graphfit_executable(ROOTPlots.find_root_config())
-            @test !success(pipeline(`$exe $input $(joinpath(dir,"bad-fit"))`;stdout=devnull,stderr=devnull))
+            @test rejects_request(exe,input,joinpath(dir,"bad-fit"))
         end
     end
 end

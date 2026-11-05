@@ -47,6 +47,19 @@ function visual_cases()
         "cms_style" => stem -> render_root(h, GraphSpec(xlabel="x", ylabel="Counts", size=(500, 400), legend=:none,
                                                         style=:CMS, cms_label=(lumi="1 fb^{-1}", energy="13 TeV")),
                                            stem; draw=:e1),
+        # cmsstyle cmsCanvas(square=false, iPos=0, extraSpace=0.05, yTitOffset=1.1): markers without
+        # error bars, dashed reference line, explicit legend, right text, log y.
+        "cms_outside" => stem -> render_root([GraphSeries(collect(0.5:1.0:12.5), [4.1e4, 7.9e4, 4.5e4, 7.2e4, 6.3e4, 8.7e4, 7.3e4,
+                                                                                   6.3e4, 5.7e4, 7.0e4, 5.9e4, 4.6e4, 5.8e4];
+                                                          label="Measurement", style=GraphStyle(marker_style=20, marker_size=1.1))],
+                                             GraphSpec(xlabel="Integrated charge [C/cm^{2}]", ylabel="Effective gain",
+                                                       xlimits=(0.0, 13.0), ylimits=(5e3, 1e6), logy=true,
+                                                       lines=[PlotLine(0.0, 6.14e4, 13.0, 6.14e4; width=2, style=2,
+                                                                       label="Mean = 6.14 #times 10^{4}")],
+                                                       legend_spec=LegendSpec(bounds=(0.62, 0.75, 0.94, 0.88), text_size=0.04),
+                                                       style=:CMS, cms_label=(position=0, right="University of Seoul",
+                                                                              extra_space=0.05, y_title_offset=1.1)),
+                                             stem),
     ]
 end
 

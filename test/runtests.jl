@@ -15,7 +15,15 @@ include("graph_feature_tests.jl")
 include("stats_box_tests.jl")
 include("axis_format_tests.jl")
 include("experiment_style_tests.jl")
+include("backend_error_tests.jl")
+include("runtime_tests.jl")
+include("native_validation_tests.jl")
+include("fit_error_tests.jl")
+include("log_axis_tests.jl")
+include("latex_tests.jl")
+include("histogram_ops_tests.jl")
 include("visual_tests.jl")
+include("text_semantic_tests.jl")
 
 @testset "DataFrame histogram: ROOT edges, signed weights, flow bins" begin
     df = DataFrame(x=[-1.0, 0.0, 1.0, 2.0], w=[2.0, 1.0, -3.0, 4.0])
@@ -149,8 +157,8 @@ end
                                                        GraphSpec(logx=true,xlimits=(0.1,2.0)))
     @test_throws ArgumentError ROOTPlots.graph_limits([GraphSeries([1,2],[0,2])],
                                                        GraphSpec(logy=true,ylimits=(0.1,3.0)))
-    @test_throws ArgumentError ROOTPlots.graph_limits([GraphSeries([1],[2];xerrors=[1])],
-                                                       GraphSpec(logx=true))
+    # An x error bar reaching zero on log x is clipped by ROOT; the range stays positive.
+    @test ROOTPlots.graph_limits([GraphSeries([1],[2];xerrors=[1])], GraphSpec(logx=true))[1][1] > 0
     @test_throws ArgumentError ROOTPlots.graph_limits([GraphSeries([1e308,1.79e308],[1,2])],
                                                        GraphSpec())
 end
@@ -193,8 +201,7 @@ end
                 valid * "END\t1\n",
             )
                 write(input,malformed)
-                @test !success(pipeline(Cmd([exe,input,joinpath(dir,"bad")]);
-                                        stdout=devnull,stderr=devnull))
+                @test rejects_request(exe,input,joinpath(dir,"bad"))
             end
         end
     end
@@ -241,8 +248,7 @@ end
                               replace(valid,"\tPIE\t"=>"\tSPEC BF(1600\t"),
                               replace(valid,"\tPIE\t"=>"\tSPEC \\\";evil()\t"))
                 write(input,malformed)
-                @test !success(pipeline(Cmd([exe,input,joinpath(dir,"invalid")]);
-                                        stdout=devnull,stderr=devnull))
+                @test rejects_request(exe,input,joinpath(dir,"invalid"))
             end
         end
     end
@@ -295,8 +301,7 @@ end
             )
                 path = joinpath(dir,"bad.tsv")
                 write(path,malformed)
-                cmd = Cmd([exe,path,joinpath(dir,"bad-output")])
-                @test !success(pipeline(cmd;stdout=devnull,stderr=devnull))
+                @test rejects_request(exe,path,joinpath(dir,"bad-output"))
             end
         end
     end
@@ -397,8 +402,7 @@ end
             for malformed in (replace(valid,"CELL3\t1\t1\t1"=>"CELL3\t2\t1\t1"),
                               replace(valid,"ZEDGE\t2\t1.0"=>"ZEDGE\t2\t0.0"))
                 write(input,malformed)
-                @test !success(pipeline(Cmd([exe,input,joinpath(dir,"bad-volume-protocol")]);
-                                        stdout=devnull,stderr=devnull))
+                @test rejects_request(exe,input,joinpath(dir,"bad-volume-protocol"))
             end
         end
     end
@@ -434,8 +438,7 @@ end
                               replace(valid,"GRID\t2\t3"=>"GRID\t2\t4"),
                               valid * "END\t1\n")
                 write(path,malformed)
-                @test !success(pipeline(Cmd([exe,path,joinpath(dir,"invalid")]);
-                                        stdout=devnull,stderr=devnull))
+                @test rejects_request(exe,path,joinpath(dir,"invalid"))
             end
         end
     end

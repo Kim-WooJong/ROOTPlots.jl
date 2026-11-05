@@ -121,8 +121,9 @@ function write_special_plot(path,g::SpecialGraph,spec::GraphSpec;points=false)
     return path
 end
 
-function render_root(g::SpecialGraph,spec::GraphSpec,stem::AbstractString;format=:png,root_config=nothing)
-    return render_root(PlotPanel(g,spec),stem;format,root_config)
+function render_root(g::SpecialGraph,spec::GraphSpec,stem::AbstractString;format=:png,
+                     provenance::Bool=false,root_config=nothing)
+    return render_root(PlotPanel(g,spec),stem;format,provenance,root_config)
 end
 
 function special_points(g::Union{EfficiencyGraph,SplineCurve,QQGraph};root_config=nothing)
@@ -131,7 +132,7 @@ function special_points(g::Union{EfficiencyGraph,SplineCurve,QQGraph};root_confi
     mktempdir() do dir
         input=write_special_plot(joinpath(dir,"points.tsv"),g,GraphSpec();points=true)
         exe=graphfit_executable(config); output=joinpath(dir,"result.tsv")
-        run(Cmd([exe,input,output]))
+        run_backend(Cmd([exe,input,output]); operation="special graph point evaluation", request=input)
         rows=readlines(output)
         first(rows)=="ROOTPlotsSpecialPoints\t1" && last(rows)=="END" || error("invalid special point result")
         samples=[parse.(Float64,split(row,'\t')[2:end]) for row in rows[2:end-1]]

@@ -1,8 +1,8 @@
 // ROOT axis, pad-title and axis-dump helpers shared by graphfit.cpp (included
 // inside its anonymous namespace) and render.cpp. ROOT and standard headers
 // belong in the translation units (TAxis, TAxisModLab, TColor, TF1, TGaxis,
-// TGraph2D, TH1, THStack, THashList, TLatex, TList, TPad, TPaveText, TROOT, TStyle,
-// TText, <fstream>, <iomanip>, <string>, <vector>). The including file provides
+// TGraph2D, TH1, THStack, THashList, TLatex, TLegend, TLegendEntry, TList, TPad,
+// TPaveText, TROOT, TStyle, TText, <fstream>, <iomanip>, <string>, <vector>). The including file provides
 // check(), integer(), real(), bit() and color().
 //
 // Every value maps to one ROOT setter; "-" means "not set": ROOT's (or the
@@ -54,7 +54,9 @@ void axis_scalars(AxisSpec &a,const std::vector<std::string> &f,size_t first) {
     const auto &o=v[AX_LABELS_OPTION];
     check(o=="h" || o=="v" || o=="u" || o=="d","invalid labels option");
   }
-  if(set(AX_TIME_OFFSET)) real(v[AX_TIME_OFFSET]);
+  // TAxis::SetTimeOffset formats the offset with 32-bit integer seconds; larger
+  // values print a wrong offset and huge ones crash ROOT (6.40.04).
+  if(set(AX_TIME_OFFSET)) check(std::abs(real(v[AX_TIME_OFFSET]))<2147483648.0,"invalid time offset");
   check(set(AX_EXPONENT_X)==set(AX_EXPONENT_Y),"exponent offset needs two values");
   if(set(AX_EXPONENT_X)) for(int i:{AX_EXPONENT_X,AX_EXPONENT_Y}) check(std::abs(real(v[i]))<=1,"invalid exponent offset");
 }
@@ -236,8 +238,9 @@ PaletteTitle palette_title_geometry(TVirtualPad *pad,TAxis *z) {
 
 // Test/debug hook: ROOTPLOTS_AXIS_DUMP=<file> appends, just before the image is
 // saved, every pad's ROOT state (log/grid/tick flags, margins, place in the
-// canvas, title box), the attributes of the pad's frame axes as ROOT reports
-// them, and the place of a palette and its z title.
+// canvas, title box), the pad's primitives with their draw options, the
+// attributes of the pad's frame axes as ROOT reports them, and the place of a
+// palette and its z title.
 std::string axis_dump_color(int index) {
   TColor *c=gROOT->GetColor(index);
   return c ? std::string(c->AsHexString()) : std::to_string(index);
@@ -278,6 +281,9 @@ void axis_dump_pad(std::ofstream &out,TVirtualPad *pad) {
      <<pad->GetGridx()<<'\t'<<pad->GetGridy()<<'\t'<<pad->GetTickx()<<'\t'<<pad->GetTicky()<<'\t'
      <<pad->GetLeftMargin()<<'\t'<<pad->GetRightMargin()<<'\t'<<pad->GetBottomMargin()<<'\t'<<pad->GetTopMargin()<<'\t'
      <<pad->GetAbsXlowNDC()<<'\t'<<pad->GetAbsYlowNDC()<<'\t'<<pad->GetAbsWNDC()<<'\t'<<pad->GetAbsHNDC()<<'\n';
+  for(TObjLink *link=pad->GetListOfPrimitives()->FirstLink();link;link=link->Next())
+    if(!link->GetObject()->InheritsFrom(TPad::Class()))
+      out<<"DRAWN\t"<<link->GetObject()->ClassName()<<'\t'<<link->GetObject()->GetName()<<'\t'<<link->GetOption()<<'\n';
   for(TObject *o:*pad->GetListOfPrimitives()) {
     auto *t=dynamic_cast<TPaveText*>(o);
     if(!t || std::string(t->GetName())!="title") continue;
@@ -296,6 +302,14 @@ void axis_dump_pad(std::ofstream &out,TVirtualPad *pad) {
     out<<"LATEX\t"<<t->GetTitle()<<'\t'<<t->GetTextFont()<<'\t'<<t->GetTextSize()<<'\t'<<t->GetX()<<'\t'
        <<t->GetY()<<'\t'<<t->GetTextAlign()<<'\t'<<t->TestBit(TLatex::kTextNDC)<<'\t'
        <<(pw>0 ? w/pw : 0)<<'\t'<<(ph>0 ? h/ph : 0)<<'\n';
+  }
+  // Legends: NDC box, then each entry's label and draw option as ROOT stores them.
+  for(TObject *o:*pad->GetListOfPrimitives()) if(auto *l=dynamic_cast<TLegend*>(o)) {
+    TList *items=l->GetListOfPrimitives();
+    out<<"LEGEND\t"<<l->GetX1NDC()<<'\t'<<l->GetY1NDC()<<'\t'<<l->GetX2NDC()<<'\t'<<l->GetY2NDC()<<'\t'
+       <<(items ? items->GetSize() : 0)<<'\n';
+    if(items) for(TObject *item:*items) if(auto *e=dynamic_cast<TLegendEntry*>(item))
+      out<<"LEGENTRY\t"<<e->GetLabel()<<'\t'<<e->GetOption()<<'\n';
   }
   if(TH1 *frame=axis_dump_frame(pad)) {
     axis_dump_axis(out,"x",frame->GetXaxis()); axis_dump_axis(out,"y",frame->GetYaxis());

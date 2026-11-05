@@ -4,7 +4,7 @@
 const PNG_MAGIC = UInt8[0x89,0x50,0x4e,0x47,0x0d,0x0a,0x1a,0x0a]
 is_png(path) = isfile(path) && read(path, 8) == PNG_MAGIC
 is_pdf(path) = isfile(path) && read(path, 4) == collect(codeunits("%PDF"))
-native_fails(exe, path, stem) = !success(pipeline(Cmd([exe, path, stem]); stdout=devnull, stderr=devnull))
+native_fails(exe, path, stem) = rejects_request(exe, path, stem)
 
 @testset "TGraphBentErrors input and serialization" begin
     x = [1., 2., 3.]; y = [2., 3., 2.5]

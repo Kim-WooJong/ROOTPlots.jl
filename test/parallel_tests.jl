@@ -112,11 +112,13 @@ end
                 read(Cmd([build(; force=true)]), String)
             end == fill("1", 3)
             # Header changes are not in the source key: force must preserve the
-            # exact same cached executable if the compiler fails.
+            # exact same cached executable if the compiler fails. The failure is a
+            # RootBackendError carrying the compiler's diagnostic.
             write(header, "#error intentional force build failure\n")
-            redirect_stderr(devnull) do
-                @test_throws ProcessFailedException build(; force=true)
-            end
+            failure = try build(; force=true); nothing catch e; e end
+            @test failure isa RootBackendError && failure.exitcode != 0 && !failure.timedout
+            @test failure.operation == "C++ compilation of fixture"
+            @test occursin("intentional force build failure", failure.stderr)
             @test read(Cmd([first_exe]), String) == "1"
             write(source, "#include <iostream>\nint main() { std::cout << 2; }\n")
             second_exe = build()

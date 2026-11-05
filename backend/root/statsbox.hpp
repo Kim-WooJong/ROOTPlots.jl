@@ -44,7 +44,10 @@ StatsBox read_stats_box(const std::vector<std::vector<std::string>> &rows,size_t
 // Optional histogram bookkeeping after the visible bins: entries, flow bins
 // (ROOT indices), and unbinned moments in TH1/TH2/TH3::GetStats order. Without
 // moments ROOT recomputes them from bin centres; without entries ROOT's
-// ResetStats sets the effective entries.
+// ResetStats sets the effective entries. Unknown entries with moments get the
+// same ROOT-computed effective entries (ResetStats, then the moments are put
+// back): every SetBinContent call above incremented fEntries, which is not a
+// fill count.
 void read_hist_stats(const std::vector<std::vector<std::string>> &rows,size_t &at,TH1 &hist) {
   if(at>=rows.size() || rows[at].empty() || rows[at][0]!="HSTATS") { hist.ResetStats(); return; }
   const auto &f=rows[at++];
@@ -76,7 +79,12 @@ void read_hist_stats(const std::vector<std::vector<std::string>> &rows,size_t &a
     double s[TH1::kNstat]={};
     for(int i=0;i<nm;++i) s[i]=real(f[4+i]);
     check(s[1]>=0,"invalid histogram moments");
-    hist.PutStats(s);
+    if(!known) {
+      hist.ResetStats();                       // ROOT's effective entries for unknown fills
+      const double effective=hist.GetEntries();
+      hist.PutStats(s);                        // PutStats leaves fEntries unchanged
+      hist.SetEntries(effective);
+    } else hist.PutStats(s);
   } else hist.ResetStats();
   if(known) hist.SetEntries(entries);
 }

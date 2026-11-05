@@ -1,5 +1,5 @@
 # Experiment styles: ROOT's built-in "ATLAS" TStyle, the package's "CMS" TStyle
-# (CMS publication style conventions), and the CMS/ATLAS labels drawn with ROOT
+# (cms-cat/cmsstyle values, cmsCanvas geometry and CMS_lumi label), and the CMS/ATLAS labels drawn with ROOT
 # TLatex. The CMS/ATLAS labels are for collaboration members, under each
 # collaboration's publication rules; the package only provides the styling.
 using ROOTPlots
@@ -33,9 +33,12 @@ common = (xlabel="m_{#mu#mu} [GeV]", ylabel="Events / 0.5 GeV", ylimits=(0.0, 52
 # 1. ROOT's default style (unchanged package look).
 push!(files, render_root(signal, GraphSpec(; common...), joinpath(output, "fit_default");
                          draw=:e1, label="Data", attached_fit=fit, fit_label="Gaussian fit").png)
-# 2. One switch: CMS style with the default "CMS Preliminary" label.
+# 2. One switch: CMS style with the default "CMS Preliminary" label. As with cmsstyle's
+# cmsCanvas on a non-square canvas, three-digit y labels need a larger y title offset
+# than the 0.78 default and extra left space (cmsCanvas yTitOffset / extraSpace).
 push!(files, render_root(signal, GraphSpec(; common..., style=:CMS,
-                                           cms_label=(lumi="138 fb^{-1}", energy="13 TeV")),
+                                           cms_label=(lumi="138 fb^{-1}", energy="13 TeV",
+                                                      y_title_offset=1.1, extra_space=0.05)),
                          joinpath(output, "fit_cms"); draw=:e1, label="Data",
                          attached_fit=fit, fit_label="Gaussian fit").png)
 # 3. ROOT's built-in ATLAS style with an "ATLAS Internal" label.
@@ -68,7 +71,8 @@ push!(files, render_root(xy.hist, Graph2DSpec(xlabel="#eta", ylabel="#phi", zlab
 
 # 7. CMS simulation label (no luminosity), placed outside the frame.
 push!(files, render_root(signal, GraphSpec(; common..., style=:CMS,
-                                           cms_label=(extra="Simulation", energy="13 TeV", position=:outside)),
+                                           cms_label=(extra="Simulation", energy="13 TeV", position=:outside,
+                                                      y_title_offset=1.1, extra_space=0.05)),
                          joinpath(output, "simulation_cms"); draw=:hist, label="Simulated signal").png)
 
 # 8. 2x2 figure in CMS style: every pad gets its own label, sized for its pad.
@@ -101,5 +105,20 @@ push!(files, render_root([cmp], [PanelSpec("Lepton p_{T} (GeV)"; ylabel="Events 
                                            cms_label=(extra="tutorial", lumi="1.21 fb^{-1}", energy="13.6 TeV",
                                                       position=:outside))],
                          joinpath(output, "stack_ratio_cms_logy")).png)
+
+# 10. cmsstyle cmsCanvas(square=false, iPos=0, extraSpace=0.05, yTitOffset=1.1): markers
+# without error bars, a dashed reference line in the legend, a right-hand text, log y.
+charge = collect(0.5:1.0:12.5)
+gain = [4.1e4, 7.9e4, 4.5e4, 7.2e4, 6.3e4, 8.7e4, 7.3e4, 6.3e4, 5.7e4, 7.0e4, 5.9e4, 4.6e4, 5.8e4]
+mean_gain = sum(gain) / length(gain)
+push!(files, render_root([GraphSeries(charge, gain; label="Measurement", style=GraphStyle(marker_style=20, marker_size=1.1))],
+                         GraphSpec(xlabel="Integrated charge [C/cm^{2}]", ylabel="Effective gain",
+                                   xlimits=(0.0, 13.0), ylimits=(5e3, 1e6), logy=true,
+                                   lines=[PlotLine(0.0, mean_gain, 13.0, mean_gain; width=2, style=2,
+                                                   label="Mean = $(round(mean_gain / 1e4; digits=2)) #times 10^{4}")],
+                                   legend_spec=LegendSpec(bounds=(0.62, 0.75, 0.94, 0.88), text_size=0.04),
+                                   style=:CMS, cms_label=(position=0, extra="p", right="University of Seoul",
+                                                          extra_space=0.05, y_title_offset=1.1)),
+                         joinpath(output, "stability_cms_outside")).png)
 
 foreach(println, files)

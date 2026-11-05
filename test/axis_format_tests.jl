@@ -21,7 +21,8 @@ function read_axis_dump(path)
             pad = (name=String(f[2]), logx=v[1] == 1, logy=v[2] == 1, logz=v[3] == 1, gridx=v[4] == 1,
                    gridy=v[5] == 1, tickx=Int(v[6]), ticky=Int(v[7]), margins=Tuple(v[8:11]),
                    place=Tuple(v[12:15]),  # canvas NDC: xlow, ylow, width, height
-                   title=Ref{Any}(nothing), axes=Dict{String,Any}(), latex=Any[], palette=Ref{Any}(nothing))
+                   title=Ref{Any}(nothing), axes=Dict{String,Any}(), latex=Any[], palette=Ref{Any}(nothing),
+                   legends=Any[])
             push!(last(canvases).pads, pad); push!(stack, pad)
         elseif f[1] == "ENDPAD"
             pop!(stack)
@@ -47,6 +48,10 @@ function read_axis_dump(path)
                 label_font=parse(Int, f[22]), title_font=parse(Int, f[23]), labels_option=String(f[24]),
                 nbinlabels=n[1], nbins=n[2], first=n[3], last=n[4],
                 bin_labels=Dict{Int,String}(), changes=Any[])
+        elseif f[1] == "LEGEND"
+            push!(last(stack).legends, (box=Tuple(parse.(Float64, f[2:5])), entries=Tuple{String,String}[]))
+        elseif f[1] == "LEGENTRY"
+            push!(last(last(stack).legends).entries, (String(f[2]), String(f[3])))
         elseif f[1] == "PALETTE"
             v = parse.(Float64, f[2:7])
             last(stack).palette[] = (x1=v[1], y1=v[2], x2=v[3], y2=v[4], title_left=v[5], title_right=v[6])
@@ -97,7 +102,8 @@ framed(canvas) = filter(p -> !isempty(p.axes), canvas.pads)
     for bad in (AxisStyle(ticks="x"), AxisStyle(ticks="++"), AxisStyle(labels_option="a"),
                 AxisStyle(labels_option="v"), AxisStyle(time_format=""), AxisStyle(time_format="a\tb"),
                 AxisStyle(time_format="é"), AxisStyle(time_format=repeat("x", 257)),
-                AxisStyle(time_offset=Inf), AxisStyle(exponent_offset=(2.0, 0.0)),
+                AxisStyle(time_offset=Inf), AxisStyle(time_offset=2.0^31), AxisStyle(time_offset=1e308),
+                AxisStyle(exponent_offset=(2.0, 0.0)),
                 AxisStyle(exponent_offset=(NaN, 0.0)), AxisStyle(bin_labels=String[]),
                 AxisStyle(bin_labels=[1 => "a", 1 => "b"]), AxisStyle(bin_labels=[0 => "a"]),
                 AxisStyle(bin_labels=[""]), AxisStyle(bin_labels=["a\tb"]), AxisStyle(bin_labels=["a\0"]),
@@ -394,8 +400,7 @@ end
             for broken in broken_requests
                 @test broken != valid
                 write(input, broken)
-                result = run(pipeline(ignorestatus(Cmd([exe, input, joinpath(dir, "bad")])); stdout=devnull, stderr=devnull))
-                @test result.exitcode == 2
+                @test rejects_request(exe, input, joinpath(dir, "bad"))
             end
         end
     else

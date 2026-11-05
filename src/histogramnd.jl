@@ -39,8 +39,8 @@ statistics box): `bins_with_flow=(sumw, sumw2)` with all `(nx+2, ny+2)` bins
 including under/overflow (index 1 and `end` on each axis), `entries` (number of
 fills, ROOT `GetEntries`), and `moments`, ROOT's unbinned in-range statistics
 `(Σw, Σw², Σwx, Σwx², Σwy, Σwy², Σwxy)` in `TH2::GetStats` order.
-[`histogram`](@ref) sets all of them; otherwise ROOT shows effective entries and
-bin-centre moments.
+[`histogram`](@ref) sets all of them; otherwise ROOT shows effective entries
+(`TH1::ResetStats`, also when only `moments` are given) and bin-centre moments.
 """
 struct Hist2D
     xedges::Vector{Float64}
@@ -235,32 +235,4 @@ end
 function histogram_axis(axis::Symbol, n::Int)
     i = findfirst(==(axis), (:x, :y, :z))
     i === nothing || i > n ? throw(ArgumentError("invalid histogram projection axis $axis")) : i
-end
-
-"""Sum other visible dimensions and variances; flow bins never enter a projection.
-
-The result is a plain visible-bin histogram: entries are unknown and moments
-are computed from bin centres when ROOT draws it.
-"""
-function projection(h::Union{Hist2D,Hist3D}, axis::Symbol)
-    validate_stats_hist_nd(h)
-    edges = hist_nd_edges(h)
-    i = histogram_axis(axis, length(edges))
-    dims = Tuple(j for j in 1:length(edges) if j != i)
-    return Hist1D(edges[i], vec(sum(h.sumw; dims)), vec(sum(h.sumw2; dims)))
-end
-
-"""Project 3D visible bins onto the two requested axes, preserving their order."""
-function projection(h::Hist3D, axes::Tuple{Symbol,Symbol})
-    validate_stats_hist_nd(h)
-    i, j = map(a -> histogram_axis(a, 3), axes)
-    i != j || throw(ArgumentError("projection axes must be distinct"))
-    k = only(filter(a -> a != i && a != j, (1, 2, 3)))
-    w = dropdims(sum(h.sumw; dims=k); dims=k)
-    v = dropdims(sum(h.sumw2; dims=k); dims=k)
-    if i > j
-        w, v = permutedims(w), permutedims(v)
-    end
-    edges = hist_nd_edges(h)
-    return Hist2D(edges[i], edges[j], w, v)
 end

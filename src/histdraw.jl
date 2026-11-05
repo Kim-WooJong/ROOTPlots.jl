@@ -53,7 +53,7 @@ end
 """
     render_root(hists::AbstractVector{Hist1D}, spec, outstem; draw, labels, styles,
                 stats=false, stats_position=:auto, stats_name=nothing, stats_headroom=false,
-                format=:png)
+                format=:png, provenance=false)
 
 Draw several TH1D objects on one ROOT canvas; later options must request SAME.
 
@@ -69,7 +69,7 @@ function render_root(hists::AbstractVector{Hist1D}, spec::GraphSpec, outstem::Ab
                      draw, labels=fill("",length(hists)),
                      styles=fill(GraphStyle(),length(hists)), format=:png,
                      stats=false, stats_position=:auto, stats_name=nothing, stats_headroom=false,
-                     root_config=nothing)
+                     provenance::Bool=false, root_config=nothing)
     paths = plot_output_paths(outstem, format)
     request = stats_request(; stats, stats_position, stats_headroom, ylimits=spec.ylimits,
                             name=stats_header(stats_name, isempty(labels) ? "" : first(labels)))
@@ -89,22 +89,14 @@ function render_root(hists::AbstractVector{Hist1D}, spec::GraphSpec, outstem::Ab
         validate_stats_hist(hists[i])
         length(hists[i].sumw) <= 1_000_000 || throw(ArgumentError("too many histogram bins"))
         check_graph_style(styles[i])
-        clean_field(String(labels[i]))
+        root_text(String(labels[i]))
         spec.logx && first(hists[i].edges) <= 0 &&
             throw(ArgumentError("log x needs positive histogram edges"))
     end
-    config = find_root_config(root_config)
-    config === nothing && throw(ArgumentError("local native ROOT not found"))
-    exe = graphfit_executable(config)
-    mkpath(dirname(outstem))
-    mktempdir() do dir
-        input=joinpath(dir,"overlay.tsv")
+    return render_request(paths, outstem, graphfit_backend(root_config);
+                          operation="histogram overlay rendering", provenance, name="overlay.tsv") do input
         write_hist_overlay_spec(input,hists,spec,limits,options,labels,styles,request)
-        stem=joinpath(dir,"rendered")
-        run(Cmd([exe,input,stem]))
-        move_plot_outputs(stem,paths)
     end
-    return paths
 end
 
 function write_hist_overlay_spec(path,hists,spec,limits,options,labels,styles,request::StatsRequest)
@@ -115,13 +107,13 @@ function write_hist_overlay_spec(path,hists,spec,limits,options,labels,styles,re
                          Int(spec.xlimits !== nothing),Int(spec.ylimits !== nothing),
                          Int(stats_active(request)),length(hists)),'\t'))
         write_stats_row(io,request)
-        println(io,join(("LABELS",clean_field(root_latex(spec.title)),
-                         clean_field(root_latex(spec.xlabel)),
-                         clean_field(root_latex(spec.ylabel))),'\t'))
+        println(io,join(("LABELS",root_text(spec.title),
+                         root_text(spec.xlabel),
+                         root_text(spec.ylabel)),'\t'))
         write_scene(io,spec)
         for (k,h) in enumerate(hists)
             style=styles[k]
-            row=("HLAYER",k,options[k],clean_field(root_latex(String(labels[k]))),
+            row=("HLAYER",k,options[k],root_text(String(labels[k])),
                  style.color,style.marker_style,style.marker_size,style.line_width,style.line_style)
             extended=style.fill_color!==nothing || style.fill_style!=1001 || style.fill_alpha!=0.35
             println(io,join(extended ? (row...,something(style.fill_color,style.color),style.fill_style,style.fill_alpha) : row,'\t'))
@@ -147,7 +139,7 @@ function raw_hist_draw_limits(h::Hist1D, spec::GraphSpec, style, label; nseries=
     all(s -> 1 <= s <= 10000, spec.size) ||
         throw(ArgumentError("canvas dimensions must be in 1:10000"))
     for field in (spec.title, spec.xlabel, spec.ylabel, String(label))
-        clean_field(field)
+        root_text(field)
         occursin('\0', field) && throw(ArgumentError("NUL is not permitted in labels"))
     end
     xlimits = spec.xlimits === nothing ? (first(h.edges), last(h.edges)) : spec.xlimits
@@ -174,7 +166,7 @@ function hist_draw_limits(h::Hist1D, spec::GraphSpec, mode, style, label)
     all(s -> 1 <= s <= 10000, spec.size) ||
         throw(ArgumentError("canvas dimensions must be in 1:10000"))
     for field in (spec.title, spec.xlabel, spec.ylabel, String(label))
-        clean_field(field)
+        root_text(field)
         occursin('\0', field) && throw(ArgumentError("NUL is not permitted in labels"))
     end
     xlo, xhi = spec.xlimits === nothing ? (first(h.edges), last(h.edges)) : spec.xlimits
@@ -231,9 +223,9 @@ function write_hist_draw_spec(path, h, spec, limits, mode, label, style;
                               limits[1]..., limits[2]..., String(spec.legend), String(mode)), '\t'))
         end
         write_stats_row(io, request)
-        println(io, join(("LABELS", clean_field(root_latex(spec.title)),
-                          clean_field(root_latex(spec.xlabel)), clean_field(root_latex(spec.ylabel)),
-                          clean_field(root_latex(String(label)))), '\t'))
+        println(io, join(("LABELS", root_text(spec.title),
+                          root_text(spec.xlabel), root_text(spec.ylabel),
+                          root_text(String(label))), '\t'))
         write_scene(io,spec)
         base=("HSTYLE",style.color,style.marker_style,style.marker_size,style.line_width,style.line_style)
         extended=style.fill_color!==nothing || style.fill_style!=1001 || style.fill_alpha!=0.35
@@ -248,7 +240,7 @@ function write_hist_draw_spec(path, h, spec, limits, mode, label, style;
         write_hist_stats(io, h)
         if attached_fit !== nothing
             write_attached_fit(io, attached_fit)
-            isempty(fit_label) || println(io, "FITLABEL\t", clean_field(root_latex(String(fit_label))))
+            isempty(fit_label) || println(io, "FITLABEL\t", root_text(String(fit_label)))
         end
         if isempty(overlays)
             println(io, "END\t1")
@@ -262,13 +254,14 @@ end
 function render_hist_root(h::Hist1D, spec::GraphSpec, outstem::AbstractString;
                           mode, label, style, format, stats=false, fitstats=false,
                           stats_position=:auto, stats_name=nothing, fit_label="",
-                          stats_headroom=false, attached_fit=nothing, overlays=GraphSeries[], root_config)
+                          stats_headroom=false, attached_fit=nothing, overlays=GraphSeries[],
+                          provenance::Bool=false, root_config)
     paths = plot_output_paths(outstem, format)
     attached_fit === nothing || validate_attached_fit(attached_fit)
     request = stats_request(; stats, fitstats, stats_position, fit=attached_fit,
                             stats_headroom, ylimits=spec.ylimits,
                             name=stats_header(stats_name, label))
-    clean_field(String(fit_label))
+    root_text(String(fit_label))
     length(overlays) <= 64 || throw(ArgumentError("too many graph overlays"))
     foreach(validate_graph,overlays)
     for s in overlays
@@ -284,18 +277,11 @@ function render_hist_root(h::Hist1D, spec::GraphSpec, outstem::AbstractString;
         isempty(overlays) || throw(ArgumentError("mixed histogram overlays require a ROOT option string"))
         hist_draw_limits(h, spec, mode, style, label)
     end
-    config = find_root_config(root_config)
-    config === nothing && throw(ArgumentError("local native ROOT not found"))
-    exe = graphfit_executable(config)
-    mkpath(dirname(outstem))
-    mktempdir() do dir
-        input = write_hist_draw_spec(joinpath(dir, "hist.tsv"), h, spec, limits, mode, label, style;
-                                     request,attached_fit,overlays,fit_label)
-        stem = joinpath(dir, "rendered")
-        run(Cmd([exe, input, stem]))
-        move_plot_outputs(stem, paths)
+    return render_request(paths, outstem, graphfit_backend(root_config);
+                          operation="histogram rendering", provenance, name="hist.tsv") do input
+        write_hist_draw_spec(input, h, spec, limits, mode, label, style;
+                             request,attached_fit,overlays,fit_label)
     end
-    return paths
 end
 
 """Draw a native TH1D followed by graph/curve layers in one styled batch canvas.
@@ -307,9 +293,9 @@ function render_root(h::Hist1D, overlays::AbstractVector{GraphSeries}, spec::Gra
                      outstem::AbstractString; draw="E1", label="Histogram",
                      style=GraphStyle(), format=:png, stats=false, fitstats=false,
                      stats_position=:auto, stats_name=nothing, attached_fit=nothing,
-                     fit_label="", stats_headroom=false, root_config=nothing)
+                     fit_label="", stats_headroom=false, provenance::Bool=false, root_config=nothing)
     draw isa AbstractString || throw(ArgumentError("mixed overlays require a ROOT draw string"))
     return render_hist_root(h,spec,outstem; mode=String(draw),label,style,format,stats,
                             fitstats,stats_position,stats_name,attached_fit,fit_label,stats_headroom,
-                            overlays,root_config)
+                            overlays,provenance,root_config)
 end

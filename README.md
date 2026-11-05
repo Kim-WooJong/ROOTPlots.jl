@@ -7,7 +7,7 @@ plot specifications are Julia values; a small C++ bridge runs ROOT in isolated
 batch processes and writes PNG/PDF. No Julia plotting package, Python, PyCall, or
 GUI is required. ROOT itself must be installed separately.
 
-**Status:** experimental (0.2.2). Source on GitHub; not registered in the Julia
+**Status:** experimental (0.3.0). Source on GitHub; not registered in the Julia
 General registry. The former package name was `JuliaROOT`. See [migration](docs/migration.md).
 
 ![Synthetic ROOT graphics gallery](docs/images/overview.png)
@@ -64,6 +64,23 @@ native processes set ROOT's message level to *warning*, so ROOT warnings and
 errors are still printed. Set `ROOTPLOTS_ROOT_VERBOSE=1` to restore ROOT's
 default verbosity, e.g. `withenv("ROOTPLOTS_ROOT_VERBOSE" => "1") do render_root(...) end`.
 
+### Time limits, output formats, reproducibility records
+
+Every native process runs under a time limit: ROOT backends
+`ROOTPLOTS_BACKEND_TIMEOUT` (default 600 s), `root-config` `ROOTPLOTS_ROOT_CONFIG_TIMEOUT`
+(60 s), compilation `ROOTPLOTS_COMPILE_TIMEOUT` (600 s); `0` or `none` disables a
+limit. On macOS/Linux a process that exceeds it is stopped with its whole process
+group (SIGTERM, then SIGKILL after 2 s) and reported as `RootBackendError` with
+`timedout=true`. `rootmap(f, jobs; timeout=120)` sets the limit for one batch, and
+an interrupt cancels only that batch's processes. Julia callbacks are not timed out.
+
+`format=:png` (default), `:pdf` or `:both` makes ROOT write only those files.
+`provenance=true` (opt-in, any `render_root`) also writes `<stem>.request.tsv` (the
+exact request with the data inline, verbatim: may be sensitive) and
+`<stem>.provenance.toml` (versions, platform, backend key, SHA-256 digests; no paths,
+host or user names), which replay the figure with the compiled backend. Details:
+[API: native processes](docs/api.md#native-processes-time-limits-cancellation-formats-records).
+
 ## Quick start
 
 ```julia
@@ -93,17 +110,33 @@ render_root(h, GraphSpec(), "output/stats"; draw=:e1, stats=true,   # name, Entr
             attached_fit=gfit, fitstats=true)                       # χ²/ndf, Prob, p0 ± error
 ```
 
+Histogram arithmetic stays in Julia and keeps ROOT's bookkeeping consistent:
+
+```julia
+total = merge(0.8 * a, 1.5 * b)        # scale independent samples, then combine them
+px = projection(h2, :x; flow=true)     # all events; exact statistics when available
+```
+
+The merged histogram's ROOT statistics box equals that of one direct weighted
+fill. See [scaling, merging, and projections](docs/api.md#scaling-merging-and-projections)
+and the task-based [recipes](docs/recipes.md) (sample weights, projection flows,
+weighted/unweighted fit errors).
+
 See [statistics and fit boxes](docs/api.md#statistics-and-fit-boxes) for field
 selection (`stats=(:entries, :mean, :underflow, :overflow)` or ROOT's `"nemruo"`),
 placement, 2D/3D histograms, profiles, graphs, and figures.
 
 Experiment styles are one keyword: `style` selects a ROOT `TStyle`
-(`gROOT->SetStyle`), e.g. ROOT's built-in `:ATLAS`, or the package's `:CMS` style,
+(`gROOT->SetStyle`), e.g. ROOT's built-in `:ATLAS`, or the package's `:CMS` style
+(values, canvas geometry and label of the CMS cmsstyle package, cms-cat/cmsstyle),
 which also draws the "CMS Preliminary" label:
 
 ```julia
 render_root(h, GraphSpec(xlabel="m [GeV]", ylabel="Events", style=:CMS), "output/cms"; draw=:e1)
 render_root(h, GraphSpec(style=:CMS, cms_label=(extra="Simulation", energy="13 TeV")), "output/sim")
+# cmsstyle cmsCanvas(square=false, iPos=0, extraSpace=0.05, yTitOffset=1.1) with a right-hand text
+render_root(h, GraphSpec(style=:CMS, cms_label=(position=0, right="University of Seoul",
+                                                extra_space=0.05, y_title_offset=1.1)), "output/cms_outside")
 render_root(h, GraphSpec(style=:ATLAS, atlas_label=(text="Internal", energy="13 TeV",
                                                    lumi="140 fb^{-1}")), "output/atlas")
 ```
@@ -116,7 +149,7 @@ publication rules; the package only provides the styling. See
 
 | Task | Main API |
 | --- | --- |
-| Weighted 1D/2D/3D histograms, flows, projection | `histogram`, `Hist1D/2D/3D`, `projection` |
+| Weighted 1D/2D/3D histograms, flows, scaling, merging, projection | `histogram`, `Hist1D/2D/3D`, `c * h`, `merge`, `projection` |
 | Points, curves, asymmetric errors and bands | `GraphSeries`, `GraphSpec`, `GraphStyle` |
 | Bent error bars; several y-error sets (stat/syst) | `BentErrorSeries`, `MultiErrorSeries`, `YErrorSet` |
 | Heatmaps, contours, surfaces, XYZ/error graphs | `Grid2D/3D`, `Graph3D`, `Graph3DErrors` |
@@ -127,7 +160,7 @@ publication rules; the package only provides the styling. See
 | Native TF2/TF3 from predefined formulas; sampled Julia grids | `ModelSurface`, `ModelVolume`, `function_grid` |
 | Mixed and nested panels, annotations, polygons, axes, legends | `PlotFigure`, `PlotPanel`, `PlotPolygon`, `AxisStyle`, `PlotText` |
 | ROOT axis formats (log, no exponent, more log labels, bin/time labels, `ChangeLabel`), grids, ROOT title box | `AxisStyle`, `LabelChange`, `CanvasStyle` |
-| ROOT styles (`gROOT->SetStyle`: ATLAS, Plain, ...; CMS publication style) and CMS/ATLAS labels | `style`, `cms_label`, `atlas_label`, `root_styles` |
+| ROOT styles (`gROOT->SetStyle`: ATLAS, Plain, ...; CMS style following cms-cat/cmsstyle) and CMS/ATLAS labels | `style`, `cms_label`, `atlas_label`, `root_styles` |
 | Data/model comparisons with ratio panels | `comparison`, `Component`, `PanelSpec` |
 | Bounded parallel independent ROOT jobs | `rootmap` |
 
@@ -163,6 +196,8 @@ julia --project=. scripts/edge_profile_demo.jl
 julia --project=. scripts/stats_box_demo.jl
 julia --project=. scripts/axis_format_demo.jl
 julia --project=. scripts/experiment_style_demo.jl
+julia --project=. scripts/correctness_demo.jl
+julia --project=. scripts/histogram_ops_demo.jl
 ```
 
 Outputs go to `examples/output/`. CSV/DataFrames analysis examples use the same

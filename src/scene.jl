@@ -46,7 +46,7 @@ documented layout default) unchanged.
 | `center_title`, `center_labels` | `TAxis::CenterTitle`, `TAxis::CenterLabels` |
 | `time_display` | `TAxis::SetTimeDisplay` |
 | `time_format` | `TAxis::SetTimeFormat` (strftime format; ROOT's `%F` offset syntax allowed) |
-| `time_offset` | `TAxis::SetTimeOffset(t, "gmt")`: UNIX time (s) of axis value 0, in GMT |
+| `time_offset` | `TAxis::SetTimeOffset(t, "gmt")`: UNIX time (s) of axis value 0, in GMT; `abs(t) < 2^31` (ROOT keeps 32-bit seconds) |
 | `exponent_offset` `(dx, dy)` | `TGaxis::SetExponentOffset(dx, dy, axis)` with axis `"x"` or `"y"` (static; one value per direction per canvas) |
 | `bin_labels` | `TAxis::SetBinLabel(bin, label)` (histogram bin axes only) |
 | `labels_option` (`"h"`, `"v"`, `"u"`, `"d"`) | `TAxis::LabelsOption` (orientation of bin labels; needs `bin_labels`) |
@@ -242,9 +242,8 @@ end
 
 valid_font(font) = 10 <= font <= 159 && mod(font,10) in (0,1,2,3)
 function scene_text(value)
-    occursin('\0',value) && throw(ArgumentError("NUL is not permitted in plot text"))
     clean_field(value)
-    return clean_field(root_latex(value))
+    return root_text(value)
 end
 function scene_color(value)
     occursin(r"^#[0-9a-fA-F]{6}$",value) || throw(ArgumentError("color must be #RRGGBB"))
@@ -297,8 +296,10 @@ function validate_axis(a::AxisStyle; name=:x)
         1 <= ncodeunits(f) <= 256 && printable_ascii(f) ||
             throw(ArgumentError("time_format must be 1:256 printable ASCII characters"))
     end
-    a.time_offset === nothing || isfinite(a.time_offset) ||
-        throw(ArgumentError("time_offset must be a finite UNIX time in seconds"))
+    # TAxis::SetTimeOffset keeps 32-bit integer seconds (1901-12-13 to 2038-01-19 UTC);
+    # outside that range ROOT prints a wrong offset or crashes.
+    a.time_offset === nothing || (isfinite(a.time_offset) && abs(a.time_offset) < 2.0^31) ||
+        throw(ArgumentError("time_offset must be a UNIX time in seconds with |t| < 2^31 (ROOT TAxis::SetTimeOffset range)"))
     if a.exponent_offset !== nothing
         name in (:x,:y,:ratio) ||
             throw(ArgumentError("exponent_offset applies to x/y axes only (TGaxis::SetExponentOffset)"))
@@ -446,7 +447,7 @@ end
 """One axis record (`tag`, axis name, scalars) followed by its time-format, bin-label and label-change rows."""
 function write_axis(io, tag, name, a::AxisStyle)
     println(io, join((tag, name, axis_scalars(a)...), '\t'))
-    a.time_format === nothing || println(io, join(("AXTIME", name, clean_field(a.time_format)), '\t'))
+    a.time_format === nothing || println(io, join(("AXTIME", name, root_text(a.time_format)), '\t'))
     if a.bin_labels !== nothing
         for (bin,label) in a.bin_labels
             println(io, join(("AXBIN", name, bin, scene_text(label)), '\t'))
@@ -464,6 +465,7 @@ function write_scene(io,spec)
     has_scene(spec) || return
     println(io,"SCENE\t1")
     spec.style === nothing || println(io,"ROOTSTYLE\t",String(spec.style))
+    write_cms_canvas(io,spec)
     c=spec.canvas
     println(io,join(("CANVAS",(scene_value(getfield(c,f)) for f in fieldnames(CanvasStyle))...), '\t'))
     for (name,a) in scene_axes(spec)
@@ -494,8 +496,15 @@ end
 # ROOT styles (gROOT->SetStyle) and experiment labels (ROOT TLatex)
 
 const LABEL_POSITIONS = (:inside_left, :inside_right, :outside)
-const CMS_LABEL_KEYS = (:extra, :lumi, :energy, :position)
+# CMS positions, with cmsstyle's iPos codes (CMS_lumi / cmsCanvas iPos).
+const CMS_LABEL_POSITIONS = (:inside_left, :inside_center, :inside_right, :outside)
+const CMS_IPOS = Dict(0 => :outside, 11 => :inside_left, 22 => :inside_center, 33 => :inside_right)
+const CMS_LABEL_KEYS = (:extra, :lumi, :energy, :right, :position, :additional_info, :cms_text,
+                        :scale_lumi, :extra_space, :y_title_offset)
 const ATLAS_LABEL_KEYS = (:text, :energy, :lumi, :position)
+# cmsstyle SetExtraText nicknames.
+const CMS_EXTRA_NICKNAMES = Dict("p" => "Preliminary", "s" => "Simulation", "su" => "Supplementary",
+                                 "wip" => "Work in progress", "pw" => "Private work (CMS data)")
 
 """
 Check a `style` value: `nothing` (ROOT's default gStyle, untouched) or a Symbol
@@ -524,7 +533,11 @@ struct ExperimentLabel
     extra::String
     right::String
     lines::Vector{String}
+    cms_text::String      # CMS: the logo text ("CMS"; "" for none)
+    scale_lumi::Float64   # CMS: luminosity text scale (CMS_lumi scaleLumi)
 end
+ExperimentLabel(kind, position, extra, right, lines) =
+    ExperimentLabel(kind, position, extra, right, lines, kind == "CMS" ? "CMS" : "", 1.0)
 
 function label_options(value, keys, name)
     value === true && return NamedTuple()
@@ -546,6 +559,29 @@ function label_position(o, name, default)
     p in LABEL_POSITIONS || throw(ArgumentError("$name.position must be one of $(join(LABEL_POSITIONS, ", "))"))
     return p
 end
+function cms_label_position(o, default)
+    p = get(o, :position, default)
+    p isa Integer && !(p isa Bool) && haskey(CMS_IPOS, p) && return CMS_IPOS[p]
+    p in CMS_LABEL_POSITIONS && return p
+    throw(ArgumentError("cms_label.position must be one of $(join(CMS_LABEL_POSITIONS, ", ")) or a cmsstyle iPos 0, 11, 22, 33"))
+end
+function label_real(o, key, default, name, valid, rule)
+    haskey(o, key) || return default
+    v = o[key]
+    v isa Real && !(v isa Bool) && isfinite(v) && valid(Float64(v)) ||
+        throw(ArgumentError("$name.$key must be $rule"))
+    return Float64(v)
+end
+function cms_additional_info(o)
+    v = get(o, :additional_info, String[])
+    lines = v isa AbstractString ? [String(v)] :
+            v isa AbstractVector && all(x -> x isa AbstractString, v) ? String.(v) :
+            throw(ArgumentError("cms_label.additional_info must be a string or a vector of strings"))
+    for line in lines
+        scene_text(line); ncodeunits(line) <= 256 || throw(ArgumentError("cms_label.additional_info line is too long"))
+    end
+    return lines
+end
 
 """
     experiment_label(spec; lumi="", annotation="")
@@ -553,9 +589,18 @@ end
 Resolve the spec's `cms_label`/`atlas_label` (and the CMS default of
 `style=:CMS`) into an `ExperimentLabel`, or `nothing`. `lumi` and
 `annotation` are a comparison panel's free texts: without an explicit
-luminosity/energy the label shows `lumi`, and `annotation` becomes a line below
-the label. Labels of 2-D/3-D views go above the frame (`:outside`) unless a
-position is given, so they do not cover coloured cells.
+luminosity/energy/right text the label shows `lumi`, and `annotation` becomes a
+line below the label. Labels of 2-D/3-D views go above the frame (`:outside`)
+unless a position is given, so they do not cover coloured cells.
+
+CMS keys follow cmsstyle (https://github.com/cms-cat/cmsstyle): `extra`
+(SetExtraText, nicknames "p", "s", "su", "wip", "pw"; an extra text containing
+"Private" drops the "CMS" text unless `cms_text` is given), `lumi`/`energy`
+(SetLumi/SetEnergy text), `right` (free text at the luminosity position),
+`position` (iPos: `:inside_left`/11, `:inside_center`/22, `:inside_right`/33,
+`:outside`/0), `additional_info` (AppendAdditionalInfo lines), `cms_text`
+(SetCmsText), `scale_lumi` (CMS_lumi scaleLumi), and the cmsCanvas options
+`extra_space` and `y_title_offset` (extraSpace, yTitOffset; need `style=:CMS`).
 """
 function experiment_label(spec; lumi="", annotation="")
     default = spec isa Union{Graph2DSpec,Graph3DSpec} ? :outside : :inside_left
@@ -571,10 +616,19 @@ function experiment_label(spec; lumi="", annotation="")
     if explicit_cms || (cms === nothing && !explicit_atlas && style_is(spec.style, "CMS"))
         o = label_options(cms === nothing ? true : cms, CMS_LABEL_KEYS, :cms_label)
         extra = label_string(o, :extra, "Preliminary", :cms_label)
+        extra = get(CMS_EXTRA_NICKNAMES, extra, extra)
         l = label_string(o, :lumi, "", :cms_label); e = label_string(o, :energy, "", :cms_label)
-        right = !isempty(l) && !isempty(e) ? "$l ($e)" : !isempty(l) ? l : !isempty(e) ? "($e)" : String(lumi)
-        lines = isempty(annotation) ? String[] : [String(annotation)]
-        return ExperimentLabel("CMS", label_position(o, :cms_label, default), extra, right, lines)
+        free = label_string(o, :right, "", :cms_label)
+        isempty(free) || (isempty(l) && isempty(e)) ||
+            throw(ArgumentError("cms_label.right replaces the luminosity/energy text; give right or lumi/energy"))
+        right = !isempty(free) ? free :
+                !isempty(l) && !isempty(e) ? "$l ($e)" : !isempty(l) ? l : !isempty(e) ? "($e)" : String(lumi)
+        cms_text = label_string(o, :cms_text, occursin("Private", extra) ? "" : "CMS", :cms_label)
+        scale = label_real(o, :scale_lumi, 1.0, :cms_label, x -> 0 < x <= 10, "a number in (0, 10]")
+        cms_canvas_options(spec)   # validates extra_space / y_title_offset
+        lines = vcat(cms_additional_info(o), isempty(annotation) ? String[] : [String(annotation)])
+        length(lines) <= 8 || throw(ArgumentError("a CMS label has at most 8 additional lines"))
+        return ExperimentLabel("CMS", cms_label_position(o, default), extra, right, lines, cms_text, scale)
     elseif explicit_atlas
         o = label_options(atlas, ATLAS_LABEL_KEYS, :atlas_label)
         extra = label_string(o, :text, "Internal", :atlas_label)
@@ -612,7 +666,36 @@ label_field(text) = isempty(text) ? "-" : scene_text(text)
 function write_experiment_label(io, label)
     label === nothing && return
     println(io, join(("EXPLABEL", label.kind, label.position, label_field(label.extra), label_field(label.right),
+                      label_field(label.cms_text), label.scale_lumi,
                       length(label.lines), (scene_text(x) for x in label.lines)...), '\t'))
+end
+
+"""
+    cms_canvas_options(spec)
+
+cmsstyle `cmsCanvas` options of a spec under `style=:CMS`: `(extra_space,
+y_title_offset)` from `cms_label` (`y_title_offset === nothing`: cmsCanvas's
+default, 1.2 on a square canvas, 0.78 otherwise), or `nothing` without the CMS
+style or for 3-D views. The keys are rejected without `style=:CMS`.
+"""
+function cms_canvas_options(spec)
+    hasproperty(spec, :cms_label) || return nothing
+    o = spec.cms_label isa NamedTuple ? spec.cms_label : NamedTuple()
+    extra_space = label_real(o, :extra_space, 0.0, :cms_label, x -> 0 <= x < 0.5, "a number in [0, 0.5)")
+    offset = label_real(o, :y_title_offset, NaN, :cms_label, x -> 0 < x <= 10, "a number in (0, 10]")
+    if !style_is(spec.style, "CMS")
+        (haskey(o, :extra_space) || haskey(o, :y_title_offset)) &&
+            throw(ArgumentError("cms_label.extra_space and y_title_offset are cmsCanvas options; they need style=:CMS"))
+        return nothing
+    end
+    spec isa Graph3DSpec && return nothing
+    return (extra_space=extra_space, y_title_offset=isnan(offset) ? nothing : offset)
+end
+"""CMSCANVAS row (cmsCanvas geometry of a single-pad canvas, applied by the native backend)."""
+function write_cms_canvas(io, spec)
+    o = cms_canvas_options(spec)
+    o === nothing && return
+    println(io, join(("CMSCANVAS", o.extra_space, something(o.y_title_offset, "-")), '\t'))
 end
 
 """Copy of a keyword-constructed spec with some fields replaced."""
@@ -630,5 +713,5 @@ function root_styles(; root_config=nothing)
     config = find_root_config(root_config)
     config === nothing && throw(ArgumentError("local native ROOT not found"))
     exe = graphfit_executable(config)
-    return String.(split(strip(read(Cmd([exe, "--styles"]), String)), '\n'))
+    return String.(split(strip(run_backend(Cmd([exe, "--styles"]); operation="style listing", capture=true)), '\n'))
 end

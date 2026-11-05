@@ -121,7 +121,7 @@ function stats_request(; stats=false, fitstats=false, stats_position=:auto, name
     stats_headroom && ylimits !== nothing &&
         throw(ArgumentError("stats_headroom raises the automatic y maximum; it cannot be combined with ylimits"))
     label = String(name)
-    clean_field(label)
+    root_text(label)
     occursin('\0', label) && throw(ArgumentError("NUL is not permitted in stats_name"))
     return StatsRequest(optstat, optfit, corner, box, isempty(label) ? "Histogram" : label, stats_headroom)
 end
@@ -129,7 +129,7 @@ end
 function write_stats_row(io, r::StatsRequest)
     stats_active(r) || return nothing
     println(io, join(("STATSBOX", r.optstat, r.optfit, r.corner, r.box...,
-                      clean_field(root_latex(r.name)), Int(r.headroom)), '\t'))
+                      root_text(r.name), Int(r.headroom)), '\t'))
     return nothing
 end
 

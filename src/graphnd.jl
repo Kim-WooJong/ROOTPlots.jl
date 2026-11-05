@@ -242,7 +242,7 @@ function validate_nd_spec(spec)
     validate_style_and_label(spec)
     spec.palette in (:bird, :viridis) || throw(ArgumentError("palette must be :bird or :viridis"))
     for label in (spec.title, spec.xlabel, spec.ylabel, spec.zlabel)
-        clean_field(label)
+        root_text(label)
         occursin('\0', label) && throw(ArgumentError("NUL is not permitted in labels"))
     end
     if spec isa Graph2DSpec
@@ -269,7 +269,7 @@ function validate_nd_spec(spec)
 end
 
 function write_nd_labels(io, spec)
-    println(io, join(("LABELS", (clean_field(root_latex(label)) for label in
+    println(io, join(("LABELS", (root_text(label) for label in
                  (spec.title,spec.xlabel,spec.ylabel,spec.zlabel))...), '\t'))
     write_scene(io, spec) # axis/canvas styles; nothing is written for default styles
 end
@@ -408,13 +408,9 @@ function write_volume_spec(path, grid::Grid3D, spec::Graph3DSpec)
     return path
 end
 
-function render_nd(data, spec, outstem, paths; root_config)
-    config=find_root_config(root_config)
-    config === nothing && throw(ArgumentError("local native ROOT not found"))
-    exe=graphfit_executable(config)
-    mkpath(dirname(outstem))
-    mktempdir() do dir
-        input=joinpath(dir,"graph.tsv")
+function render_nd(data, spec, outstem, paths; provenance::Bool=false, root_config)
+    return render_request(paths, outstem, graphfit_backend(root_config);
+                          operation="2-D/3-D rendering", provenance, name="graph.tsv") do input
         if data isa Grid2D
             write_grid_spec(input,data,spec)
         elseif data isa Grid3D
@@ -422,16 +418,12 @@ function render_nd(data, spec, outstem, paths; root_config)
         else
             write_xyz_spec(input,data,spec)
         end
-        stem=joinpath(dir,"rendered")
-        run(Cmd([exe,input,stem]))
-        move_plot_outputs(stem, paths)
     end
-    return paths
 end
 
 """Draw a genuine TH3D volume with an unchanged ROOT draw-option string."""
 function render_root(grid::Grid3D, spec::Graph3DSpec, outstem::AbstractString;
-                     format=:png, root_config=nothing)
+                     format=:png, provenance::Bool=false, root_config=nothing)
     paths = plot_output_paths(outstem, format)
     validate_grid(grid); validate_nd_spec(spec)
     spec.draw isa AbstractString ||
@@ -443,25 +435,25 @@ function render_root(grid::Grid3D, spec::Graph3DSpec, outstem::AbstractString;
             throw(ArgumentError("log $axis needs positive grid edges"))
     end
     check_spec_bins(spec, "Grid3D", size(grid.values)...)
-    return render_nd(grid,spec,outstem,paths;root_config)
+    return render_nd(grid,spec,outstem,paths;provenance,root_config)
 end
 
 """Render Grid2D as a 2-D heatmap or contours using native ROOT."""
 function render_root(grid::Grid2D, spec::Graph2DSpec, outstem::AbstractString;
-                     format=:png, root_config=nothing)
+                     format=:png, provenance::Bool=false, root_config=nothing)
     paths = plot_output_paths(outstem, format)
     validate_grid(grid); validate_nd_spec(spec)
     spec.logx && first(grid.xedges) <= 0 && throw(ArgumentError("log x needs positive grid edges"))
     spec.logy && first(grid.yedges) <= 0 && throw(ArgumentError("log y needs positive grid edges"))
     check_spec_bins(spec, "Grid2D", size(grid.values)...)
-    return render_nd(grid,spec,outstem,paths;root_config)
+    return render_nd(grid,spec,outstem,paths;provenance,root_config)
 end
 
 """Overlay several TH2D objects on one canvas, forwarding each ROOT option unchanged."""
 function render_root(grids::AbstractVector{Grid2D}, spec::Graph2DSpec,
                      outstem::AbstractString; draw,
                      styles=fill(GraphStyle(),length(grids)), format=:png,
-                     root_config=nothing)
+                     provenance::Bool=false, root_config=nothing)
     paths=plot_output_paths(outstem,format)
     2 <= length(grids) <= 32 || throw(ArgumentError("2-D overlay needs 2:32 layers"))
     length(draw) == length(styles) == length(grids) ||
@@ -483,22 +475,15 @@ function render_root(grids::AbstractVector{Grid2D}, spec::Graph2DSpec,
         push!(options,value)
     end
     check_spec_bins(spec, "a 2-D overlay", size(first(grids).values)...)
-    config=find_root_config(root_config)
-    config === nothing && throw(ArgumentError("local native ROOT not found"))
-    exe=graphfit_executable(config)
-    mkpath(dirname(outstem))
-    mktempdir() do dir
-        input=write_grid_overlay_spec(joinpath(dir,"overlay.tsv"),grids,spec,options,styles)
-        stem=joinpath(dir,"rendered")
-        run(Cmd([exe,input,stem]))
-        move_plot_outputs(stem,paths)
+    return render_request(paths, outstem, graphfit_backend(root_config);
+                          operation="2-D grid overlay rendering", provenance, name="overlay.tsv") do input
+        write_grid_overlay_spec(input,grids,spec,options,styles)
     end
-    return paths
 end
 
 """Render a gridded 3-D surface using native ROOT."""
 function render_root(grid::Grid2D, spec::Graph3DSpec, outstem::AbstractString;
-                     format=:png, root_config=nothing)
+                     format=:png, provenance::Bool=false, root_config=nothing)
     paths = plot_output_paths(outstem, format)
     validate_grid(grid); validate_nd_spec(spec)
     spec.logx && first(grid.xedges) <= 0 && throw(ArgumentError("log x needs positive grid edges"))
@@ -510,13 +495,13 @@ function render_root(grid::Grid2D, spec::Graph3DSpec, outstem::AbstractString;
             throw(ArgumentError("3-D surface needs at least two cells along both x and y"))
     end
     check_spec_bins(spec, "Grid2D", size(grid.values)...)
-    return render_nd(grid,spec,outstem,paths;root_config)
+    return render_nd(grid,spec,outstem,paths;provenance,root_config)
 end
 
 """Render native XYZ points/errors/lines, or explicitly opt into scattered ROOT interpolation."""
 function render_root(cloud::Union{Graph3D,Graph3DErrors}, spec::Graph3DSpec, outstem::AbstractString;
-                     format=:png, root_config=nothing)
+                     format=:png, provenance::Bool=false, root_config=nothing)
     paths = plot_output_paths(outstem, format)
     validate_xyz_plot(cloud,spec)
-    return render_nd(cloud,spec,outstem,paths;root_config)
+    return render_nd(cloud,spec,outstem,paths;provenance,root_config)
 end

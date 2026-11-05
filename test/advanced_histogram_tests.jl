@@ -76,7 +76,7 @@ end
         @test sum(stats3.entries)==1.
         overflow=Profile1D([0.,1.],[.2,.4],[1e154,1e154];error=:gaussian)
         redirect_stdio(stdout=devnull,stderr=devnull) do
-            @test_throws ProcessFailedException profile_stats(overflow)
+            @test_throws RootBackendError profile_stats(overflow)
         end
     end
 end
@@ -107,13 +107,11 @@ end
                 replace(original,"PEDGE\t1\t2\t1.0"=>"PEDGE\t1\t2\t0.0"),
                 replace(original,"END\t6"=>"END\t9"),original*"EXTRA\n"))
                 write(input,broken)
-                process=run(pipeline(ignorestatus(Cmd([native,input,joinpath(dir,"bad-$i")]));stdout=devnull,stderr=devnull))
-                @test process.exitcode==2
+                @test rejects_request(native,input,joinpath(dir,"bad-$i"))
             end
             ROOTPlots.write_advanced_plot(input,poly,Graph2DSpec())
             write(input,replace(read(input,String),"VERTEX\t3\t0.5\t1.0"=>"VERTEX\t3\t0.5\t0.0"))
-            process=run(pipeline(ignorestatus(Cmd([native,input,joinpath(dir,"bad-polygon")]));stdout=devnull,stderr=devnull))
-            @test process.exitcode==2
+            @test rejects_request(native,input,joinpath(dir,"bad-polygon"))
             # Distinct-output process isolation remains compatible with rootmap.
             results=rootmap(1:2;workers=2) do i
                 render_root(p1,GraphSpec(),joinpath(dir,"parallel-$i"))
